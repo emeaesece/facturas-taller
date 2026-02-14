@@ -17,7 +17,7 @@ st.set_page_config(page_title="Taller Cloud 2026", page_icon="⚙️", layout="w
 try:
     api_key_env = st.secrets["GOOGLE_API_KEY"]
     # Usamos la versión estable v1
-    client_ia = genai.Client(api_key=api_key_env, http_options={'api_version': 'v1'})
+    client_ia = genai.Client(api_key=api_key_env) # Sin forzar api_version si no es estrictamente necesario
 except Exception as e:
     st.error("❌ Configura GOOGLE_API_KEY en los Secrets de Streamlit.")
     st.stop()
@@ -46,20 +46,33 @@ def analizar_factura(archivo_bytes, mime_type):
     Limpia los números de puntos de miles para que sean procesables."""
     
     try:
-        # CORRECCIÓN CLAVE: Envolviendo el archivo en types.Part.from_bytes
+        # Usamos un diccionario directo para la configuración
+        # Esto evita que la librería use nombres que la API no reconoce
         response = client_ia.models.generate_content(
             model="gemini-1.5-flash",
             contents=[
                 prompt,
                 types.Part.from_bytes(data=archivo_bytes, mime_type=mime_type)
             ],
-            config=types.GenerateContentConfig(response_mime_type='application/json')
+            config={
+                'response_mime_type': 'application/json', # Corregido a formato snake_case
+            }
         )
         return json.loads(response.text)
     except Exception as e:
-        st.error(f"❌ Error de validación o API: {e}")
-        return None
-
+        # Si esto falla, intentamos sin forzar el MIME type por si la API está estricta
+        try:
+            response = client_ia.models.generate_content(
+                model="gemini-1.5-flash",
+                contents=[prompt, types.Part.from_bytes(data=archivo_bytes, mime_type=mime_type)]
+            )
+            # Limpiamos el texto por si la IA añade markdown ```json
+            txt = response.text.strip().replace("```json", "").replace("```", "")
+            return json.loads(txt)
+        except Exception as e2:
+            st.error(f"❌ Error persistente: {e2}")
+            return None
+            
 # ==========================================
 # 🖥️ 4. INTERFAZ DE USUARIO
 # ==========================================
@@ -127,3 +140,4 @@ else:
     if menu == "Salir":
         st.session_state.auth = False
         st.rerun()
+
