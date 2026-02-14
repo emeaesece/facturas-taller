@@ -48,19 +48,22 @@ def limpiar_monto_py(valor):
         return 0.0
 
 def analizar_factura(archivo_bytes, mime_type):
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    prompt = """Analiza esta factura. Extrae: fecha (YYYY-MM-DD), proveedor, y una lista de items con: producto, cantidad, unitario, total. Devuelve SOLAMENTE el JSON."""
-    
     try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        prompt = """Analiza esta factura. Extrae: fecha (YYYY-MM-DD), proveedor, y una lista de items con: producto, cantidad, unitario, total. Devuelve SOLAMENTE el JSON."""
+        
         response = model.generate_content([prompt, {"mime_type": mime_type, "data": archivo_bytes}])
+        
+        # Si la respuesta es exitosa
         texto_crudo = response.text.strip().replace("```json", "").replace("```", "")
-        # Intentamos capturar el JSON
         inicio = texto_crudo.find("{")
         fin = texto_crudo.rfind("}") + 1
         return json.loads(texto_crudo[inicio:fin])
+        
     except Exception as e:
-        st.error(f"Error procesando JSON: {e}")
-        st.write("Respuesta cruda de la IA:", response.text) # DIAGNÓSTICO
+        # Aquí capturamos el error de la API Key y lo mostramos claro
+        st.error(f"⚠️ Error de Autenticación/IA: {e}")
+        st.info("Revisa que tu GOOGLE_API_KEY en los Secrets de Streamlit sea válida.")
         return None
 
 # ==========================================
@@ -135,3 +138,4 @@ else:
     if menu == "Salir":
         st.session_state.auth = False
         st.rerun()
+
