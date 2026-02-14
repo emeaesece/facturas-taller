@@ -8,17 +8,34 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # ==========================================
-# ⚙️ 1. CONFIGURACIÓN
+# ⚙️ 1. CONFIGURACIÓN (REFORZADA)
 # ==========================================
 st.set_page_config(page_title="Taller Cloud - Motor Nuevo", page_icon="⚙️", layout="wide")
 
-# Intentar conectar con la IA
-try:
-    # Recuperamos la clave de los Secretos de Streamlit Cloud
+# Intentar recuperar la clave de varias formas posibles
+api_key_env = None
+
+if "GOOGLE_API_KEY" in st.secrets:
     api_key_env = st.secrets["GOOGLE_API_KEY"]
-    client_ia = genai.Client(api_key=api_key_env)
-except Exception as e:
-    st.error("❌ Error grave: No se encontró la GOOGLE_API_KEY en los Secrets.")
+elif "api_key" in st.secrets:
+    api_key_env = st.secrets["api_key"]
+elif "GEMINI_KEY" in st.secrets:
+    api_key_env = st.secrets["GEMINI_KEY"]
+
+if api_key_env:
+    try:
+        client_ia = genai.Client(api_key=api_key_env)
+    except Exception as e:
+        st.error(f"❌ Error al inicializar el cliente de IA: {e}")
+        st.stop()
+else:
+    st.error("❌ ERROR CRÍTICO: No se encontró ninguna clave API en los Secrets.")
+    st.info("""
+    **Cómo solucionarlo:**
+    1. Ve a los Settings de tu app en Streamlit Cloud.
+    2. En 'Secrets', asegúrate de tener una línea que diga:
+    `GOOGLE_API_KEY = "tu_clave_aqui"`
+    """)
     st.stop()
 
 # ==========================================
@@ -112,3 +129,4 @@ else:
     if menu == "Salir":
         st.session_state.auth = False
         st.rerun()
+
