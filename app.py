@@ -17,17 +17,18 @@ st.set_page_config(
     layout="wide"
 )
 
-# Inyectar un poco de estilo para que se vea mejor en móviles
+# Estilo para botones grandes y legibles
 st.markdown("""
     <style>
     .stButton>button { width: 100%; border-radius: 10px; height: 3em; }
     </style>
     """, unsafe_allow_html=True)
+
 # Recuperar API Key de Gemini
 try:
     GEMINI_KEY = st.secrets["GOOGLE_API_KEY"]
 except:
-    GEMINI_KEY = "TAIzaSyDBTsVTGgj9Ne_vQ-wyr9WaT0Zmsfyavbo"
+    GEMINI_KEY = "TU_CLAVE_LOCAL_AQUI"
 
 genai.configure(api_key=GEMINI_KEY)
 
@@ -36,21 +37,18 @@ genai.configure(api_key=GEMINI_KEY)
 # ==========================================
 
 def conectar_sheets():
-    """Establece conexión con la base de datos en la nube"""
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
-        # Nombre exacto de tu archivo en Drive
         return client.open("BaseDatos_Taller")
     except Exception as e:
         st.error(f"Error de conexión con Google Sheets: {e}")
         return None
 
 def check_login(u, p):
-    """Verifica credenciales en la pestaña 'Usuarios'"""
     try:
         sh = conectar_sheets()
         ws = sh.worksheet("Usuarios")
@@ -63,7 +61,6 @@ def check_login(u, p):
         return False
 
 def guardar_en_nube(item, usuario):
-    """Inserta una fila en la pestaña 'Gastos'"""
     try:
         sh = conectar_sheets()
         ws = sh.worksheet("Gastos")
@@ -74,33 +71,37 @@ def guardar_en_nube(item, usuario):
         ]
         ws.append_row(fila)
         return True
-    except Exception as e:
-        st.error(f"Error al guardar: {e}")
+    except:
         return False
 
 # ==========================================
-# 🧠 3. MOTOR DE INTELIGENCIA ARTIFICIAL
+# 🧠 3. MOTOR DE INTELIGENCIA ARTIFICIAL (REFORZADO)
 # ==========================================
 
 def analizar_factura(archivo_bytes, mime_type):
-    """Extrae datos usando Gemini 1.5 Flash"""
-    # Usamos el nombre de modelo más compatible
     model = genai.GenerativeModel('gemini-1.5-flash')
-    
     prompt = """
-    Extrae los items de esta factura de taller. 
-    Devuelve un JSON estrictamente con este formato:
+    Eres un experto contable de taller mecánico. Analiza esta imagen de factura.
+    Busca CUALQUIER tabla o lista de productos, repuestos o servicios.
+    
+    Extrae la información y devuélvela en este formato JSON EXACTO:
     {
         "fecha": "YYYY-MM-DD",
-        "proveedor": "Nombre",
+        "proveedor": "Nombre de la empresa",
         "items": [
-            {"producto": "Desc", "cantidad": 0.0, "unidad": "u", "unitario": 0.0, "total": 0.0}
+            {
+                "producto": "Nombre del repuesto",
+                "cantidad": 1.0,
+                "unidad": "u",
+                "unitario": 0.0,
+                "total": 0.0
+            }
         ]
     }
+    Si no hay cantidad, asume 1.0. Devuelve SOLO el JSON.
     """
     try:
         response = model.generate_content([prompt, {"mime_type": mime_type, "data": archivo_bytes}])
-        # Limpiar respuesta para obtener solo el JSON
         raw_text = response.text.strip().replace("```json", "").replace("```", "")
         start = raw_text.find("{")
         end = raw_text.rfind("}") + 1
@@ -115,39 +116,32 @@ def analizar_factura(archivo_bytes, mime_type):
 if 'sesion' not in st.session_state:
     st.session_state.sesion = False
 
-# --- PANTALLA DE ACCESO ---
 if not st.session_state.sesion:
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.title("🔐 Gestión Taller Cloud")
+        st.title("🔐 Acceso Taller Cloud")
         user_in = st.text_input("Usuario")
         pass_in = st.text_input("Contraseña", type="password")
-        
-        # Uso de width='stretch' según requerimiento 2026
-        if st.button("Entrar al Sistema", type="primary", width='stretch'):
+        if st.button("Entrar", type="primary"):
             if check_login(user_in, pass_in):
                 st.session_state.sesion = True
                 st.session_state.user = user_in
                 st.rerun()
             else:
                 st.error("Credenciales incorrectas")
-
-# --- PANTALLA PRINCIPAL ---
 else:
     with st.sidebar:
         st.header(f"👤 {st.session_state.user}")
-        menu = st.radio("Menu", ["📥 Cargar Compra", "📊 Historial", "🚀 Salir"])
-        
+        menu = st.radio("Menú", ["📥 Cargar Compra", "📊 Historial", "🚀 Salir"])
         if menu == "🚀 Salir":
             st.session_state.sesion = False
             st.rerun()
 
-    # --- MÓDULO CARGA ---
     if menu == "📥 Cargar Compra":
         st.title("📥 Digitalizar Factura")
         files = st.file_uploader("Sube fotos o PDFs", accept_multiple_files=True)
         
-        if files and st.button("Analizar y Guardar", type="primary", width='stretch'):
+        if files and st.button("Analizar y Guardar", type="primary"):
             bar = st.progress(0)
             status = st.empty()
             count = 0
@@ -157,51 +151,45 @@ else:
                 status.write(f"⚙️ Procesando: {f.name}...")
                 
                 data = analizar_factura(f.getvalue(), f.type)
-                if data:
+                
+                # --- AQUÍ ESTABA EL ERROR DE INDENTACIÓN CORREGIDO ---
+                if data and "items" in data:
                     fecha_f = data.get("fecha", str(datetime.date.today()))
                     prov_f = data.get("proveedor", "Desconocido")
+                    items_lista = data.get("items", [])
                     
-                    for item in data.get("items", []):
+                    for item in items_lista:
                         obj = {
-                            "Fecha": fecha_f, "Proveedor": prov_f,
-                            "Producto": item.get("producto"),
-                            "Cantidad": item.get("cantidad", 0),
+                            "Fecha": fecha_f,
+                            "Proveedor": prov_f,
+                            "Producto": item.get("producto", "Sin nombre"),
+                            "Cantidad": float(item.get("cantidad", 1)),
                             "Unidad": item.get("unidad", "u"),
-                            "Precio Unitario": item.get("unitario", 0),
-                            "Precio Total": item.get("total", 0)
+                            "Precio Unitario": float(item.get("unitario", 0)),
+                            "Precio Total": float(item.get("total", 0))
                         }
                         if guardar_en_nube(obj, st.session_state.user):
                             count += 1
                 time.sleep(1)
             
             status.empty()
-            st.success(f"✅ ¡Hecho! Se registraron {count} items en Google Sheets.")
+            if count > 0:
+                st.success(f"✅ Se registraron {count} items en Google Sheets.")
+            else:
+                st.warning("No se detectaron items. Intenta con una foto más clara.")
 
-    # --- MÓDULO HISTORIAL ---
     elif menu == "📊 Historial":
-        st.title("📊 Consultar Precios")
-        search = st.text_input("🔍 Buscar repuesto o proveedor...")
-        
+        st.title("📊 Historial de Compras")
+        search = st.text_input("🔍 Buscar repuesto...")
         try:
             sh = conectar_sheets()
             ws = sh.worksheet("Gastos")
             df = pd.DataFrame(ws.get_all_records())
-            
             if not df.empty:
                 if search:
                     df = df[df.apply(lambda r: r.astype(str).str.contains(search, case=False).any(), axis=1)]
-                
-                # Visualización con ancho elástico para 2026
-                st.dataframe(
-                    df, 
-                    column_config={
-                        "Precio Total": st.column_config.NumberColumn(format="$ %.2f"),
-                        "Precio Unitario": st.column_config.NumberColumn(format="$ %.2f"),
-                        "Fecha": st.column_config.DateColumn()
-                    },
-                    width='stretch'
-                )
+                st.dataframe(df, use_container_width=True)
             else:
-                st.info("No hay datos cargados todavía.")
+                st.info("Sin datos.")
         except:
-            st.error("No se pudo leer la base de datos.")
+            st.error("Error al leer la base de datos.")
