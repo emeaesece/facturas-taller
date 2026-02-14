@@ -122,3 +122,26 @@ else:
     if menu == "🚀 Salir":
         st.session_state.auth = False
         st.rerun()
+
+import streamlit as st
+import requests
+
+st.title("🔍 Diagnóstico de Modelos Disponibles")
+
+API_KEY = st.secrets["GOOGLE_API_KEY"]
+url = f"https://generativelanguage.googleapis.com/v1/models?key={API_KEY}"
+
+if st.button("Listar Modelos Permitidos"):
+    try:
+        response = requests.get(url)
+        data = response.json()
+        
+        if response.status_code == 200:
+            st.success("✅ Conexión exitosa. Estos son tus modelos:")
+            # Listamos solo los nombres de los modelos
+            modelos = [m['name'] for m in data.get('models', [])]
+            st.write(modelos)
+        else:
+            st.error(f"❌ Error {response.status_code}: {data.get('error', {}).get('message')}")
+    except Exception as e:
+        st.error(f"Falló la conexión: {e}")
