@@ -134,4 +134,35 @@ else:
                 bar.progress((idx + 1) / len(files))
             st.session_state.batch = pd.DataFrame(items)
 
+# --- BLOQUE CORREGIDO ---
         if 'batch' in st.session_state and not st.session_state.batch.empty:
+            st.markdown("---")
+            st.subheader("📝 Revisión Previa al Guardado")
+            
+            # El editor debe estar indentado (un nivel adentro del IF)
+            edited = st.data_editor(st.session_state.batch, use_container_width=True)
+            
+            if st.button("Confirmar y Guardar Todo", type="primary"):
+                ws = obtener_o_crear_pestana(sh, st.session_state.user)
+                existentes = pd.DataFrame(safe_get_records(ws))
+                
+                with st.spinner("Guardando en la nube..."):
+                    for _, row in edited.iterrows():
+                        # Generamos el ID único para evitar duplicados en Paraguay
+                        id_u = f"{row['Proveedor']}_{row['Fecha']}_{row['Factura']}_{row['Producto']}".upper().replace(" ", "")
+                        
+                        if not existentes.empty and 'ID_Unico' in existentes.columns:
+                            if id_u in existentes['ID_Unico'].values:
+                                continue # Si ya existe, salta al siguiente sin error
+                        
+                        # Guardamos la fila con los montos ya limpios de la versión anterior
+                        ws.append_row([
+                            str(row['Fecha']), str(row['Proveedor']), str(row['Factura']), 
+                            row['Producto'], row['Cantidad'], "u", 
+                            row['Unitario'], row['Total'], st.session_state.user, 
+                            id_u, str(datetime.datetime.now())
+                        ])
+                
+                st.success(f"✅ ¡{len(edited)} registros procesados correctamente!")
+                st.session_state.batch = None # Limpiamos la memoria para la próxima carga
+                st.balloons()
