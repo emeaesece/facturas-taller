@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import google.generativeai as genai
+from google import genai # <--- Nuevo motor oficial 2026
 import json
 import time
 import datetime
@@ -10,17 +10,19 @@ from oauth2client.service_account import ServiceAccountCredentials
 # ==========================================
 # ⚙️ 1. CONFIGURACIÓN
 # ==========================================
-st.set_page_config(page_title="Taller Cloud - Modo Diagnóstico", page_icon="🔧", layout="wide")
+st.set_page_config(page_title="Taller Cloud - Motor Nuevo", page_icon="⚙️", layout="wide")
 
+# Intentar conectar con la IA
 try:
-    GEMINI_KEY = st.secrets["GOOGLE_API_KEY"]
-except:
-    GEMINI_KEY = "TU_CLAVE_LOCAL"
-
-genai.configure(api_key=GEMINI_KEY)
+    # Recuperamos la clave de los Secretos de Streamlit Cloud
+    api_key_env = st.secrets["GOOGLE_API_KEY"]
+    client_ia = genai.Client(api_key=api_key_env)
+except Exception as e:
+    st.error("❌ Error grave: No se encontró la GOOGLE_API_KEY en los Secrets.")
+    st.stop()
 
 # ==========================================
-# ☁️ 2. CONEXIÓN A SHEETS
+# ☁️ 2. CONEXIÓN A GOOGLE SHEETS
 # ==========================================
 def conectar_sheets():
     try:
@@ -28,55 +30,46 @@ def conectar_sheets():
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        client = gspread.authorize(creds)
-        return client.open("BaseDatos_Taller")
+        gc = gspread.authorize(creds)
+        return gc.open("BaseDatos_Taller")
     except Exception as e:
-        st.error(f"Error de conexión: {e}")
+        st.error(f"Error Sheets: {e}")
         return None
 
 # ==========================================
-# 🧠 3. MOTOR DE IA Y LIMPIEZA REFORZADA
+# 🧠 3. MOTOR IA (NUEVO SDK google.genai)
 # ==========================================
-def limpiar_monto_py(valor):
-    """Limpia montos para el formato de Paraguay (1.500.000)"""
-    if not valor: return 0.0
-    try:
-        # Convertir a string y quitar símbolos
-        s = str(valor).upper().replace('GS', '').replace('.', '').replace(',', '.').strip()
-        return float(s)
-    except:
-        return 0.0
-
 def analizar_factura(archivo_bytes, mime_type):
+    prompt = """Analiza esta factura de taller. Extrae en JSON: fecha (YYYY-MM-DD), 
+    proveedor, y lista de items con (producto, cantidad, unitario, total). 
+    Si los números tienen puntos de miles (1.500.000), límpialos para que sean solo números."""
+    
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        prompt = """Analiza esta factura. Extrae: fecha (YYYY-MM-DD), proveedor, y una lista de items con: producto, cantidad, unitario, total. Devuelve SOLAMENTE el JSON."""
+        # Nueva forma de llamar a Gemini en 2026
+        response = client_ia.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=prompt,
+            config={'response_mime_type': 'application/json'} # Forzamos JSON nativo
+        )
         
-        response = model.generate_content([prompt, {"mime_type": mime_type, "data": archivo_bytes}])
-        
-        # Si la respuesta es exitosa
-        texto_crudo = response.text.strip().replace("```json", "").replace("```", "")
-        inicio = texto_crudo.find("{")
-        fin = texto_crudo.rfind("}") + 1
-        return json.loads(texto_crudo[inicio:fin])
+        # El nuevo SDK devuelve el JSON más limpio
+        return json.loads(response.text)
         
     except Exception as e:
-        # Aquí capturamos el error de la API Key y lo mostramos claro
-        st.error(f"⚠️ Error de Autenticación/IA: {e}")
-        st.info("Revisa que tu GOOGLE_API_KEY en los Secrets de Streamlit sea válida.")
+        st.error(f"❌ Error de Llave o Conexión: {e}")
+        st.info("Verifica que tu API KEY sea válida en Google AI Studio.")
         return None
 
 # ==========================================
-# 🖥️ 4. INTERFAZ
+# 🖥️ 4. INTERFAZ (IGUAL A LA ANTERIOR)
 # ==========================================
 if 'auth' not in st.session_state: st.session_state.auth = False
 
 if not st.session_state.auth:
-    st.title("🔐 Acceso")
+    st.title("🔐 Acceso Taller")
     u = st.text_input("Usuario")
     p = st.text_input("Pass", type="password")
-    if st.button("Entrar", width='stretch'):
-        # Login simplificado para pruebas
+    if st.button("Ingresar", width='stretch'):
         st.session_state.auth = True
         st.session_state.user = u
         st.rerun()
@@ -85,46 +78,28 @@ else:
     
     if menu == "Cargar":
         st.title("📥 Cargar Factura")
-        f = st.file_uploader("Subir archivo", type=["pdf", "jpg", "png"])
-        
-        if f and st.button("Procesar", width='stretch'):
-            with st.spinner("Analizando..."):
-                datos = analizar_factura(f.getvalue(), f.type)
+        f = st.file_uploader("Subir", type=["pdf", "jpg", "png"])
+        if f and st.button("Procesar con Motor Nuevo"):
+            datos = analizar_factura(f.getvalue(), f.type)
+            if datos:
+                st.write("### Datos detectados:")
+                st.json(datos)
                 
-                if datos:
-                    # MOSTRAR LO QUE LA IA ENCONTRÓ ANTES DE GUARDAR
-                    st.write("### 🔎 Datos detectados por la IA:")
-                    st.json(datos)
-                    
-                    if "items" in datos and len(datos["items"]) > 0:
-                        sh = conectar_sheets()
-                        ws = sh.worksheet("Gastos")
+                # Lógica de guardado en Sheets
+                sh = conectar_sheets()
+                if sh:
+                    ws = sh.worksheet("Gastos")
+                    for item in datos.get("items", []):
+                        # Limpieza básica de números
+                        def clean_n(n): return float(str(n).replace('.','').replace(',','.')) if n else 0
                         
-                        count = 0
-                        for item in datos["items"]:
-                            # Limpieza específica para los guaraníes/formatos con puntos
-                            cant = limpiar_monto_py(item.get("cantidad", 1))
-                            unit = limpiar_monto_py(item.get("unitario", 0))
-                            total = limpiar_monto_py(item.get("total", 0))
-                            
-                            fila = [
-                                datos.get("fecha", ""),
-                                datos.get("proveedor", ""),
-                                item.get("producto", ""),
-                                cant,
-                                item.get("unidad", "u"),
-                                unit,
-                                total,
-                                st.session_state.user,
-                                str(datetime.datetime.now())
-                            ]
-                            ws.append_row(fila)
-                            count += 1
-                        st.success(f"✅ Guardados {count} items en Google Sheets.")
-                    else:
-                        st.error("La IA no encontró la lista de productos dentro del archivo.")
-                else:
-                    st.error("No se pudo obtener una respuesta válida de la IA.")
+                        ws.append_row([
+                            datos.get("fecha"), datos.get("proveedor"),
+                            item.get("producto"), clean_n(item.get("cantidad")),
+                            "u", clean_n(item.get("unitario")), clean_n(item.get("total")),
+                            st.session_state.user, str(datetime.datetime.now())
+                        ])
+                    st.success("✅ Guardado en la nube.")
 
     elif menu == "Historial":
         st.title("📊 Historial")
@@ -132,10 +107,8 @@ else:
             sh = conectar_sheets()
             df = pd.DataFrame(sh.worksheet("Gastos").get_all_records())
             st.dataframe(df, width='stretch')
-        except:
-            st.error("Carga datos primero para ver el historial.")
-            
+        except: st.error("No hay datos.")
+        
     if menu == "Salir":
         st.session_state.auth = False
         st.rerun()
-
