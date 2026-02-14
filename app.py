@@ -12,7 +12,7 @@ import re
 # ==========================================
 # ⚙️ 1. CONFIGURACIÓN
 # ==========================================
-st.set_page_config(page_title="Taller Pro - v30 Control Total", page_icon="🔧", layout="wide")
+st.set_page_config(page_title="Taller Pro - v31 Cálculo Pro", page_icon="🔧", layout="wide")
 
 if 'batch' not in st.session_state:
     st.session_state.batch = pd.DataFrame()
@@ -51,19 +51,21 @@ def obtener_o_crear_pestana(sh, nombre_usuario):
         return ws
 
 def limpiar_monto_py(valor, es_cantidad=False):
-    if valor is None or str(valor).strip() == "": return 0
+    if valor is None or str(valor).strip() == "": return 0.0
     s = str(valor).upper().replace('GS', '').replace('$', '').replace(' ', '').strip()
     try:
         if es_cantidad:
+            # Reemplaza coma por punto para decimales (ej: 1,5 -> 1.5)
             s = s.replace(',', '.')
             if s.count('.') > 1:
                 partes = s.split('.')
                 s = "".join(partes[:-1]) + "." + partes[-1]
             return float(s)
         else:
+            # Moneda: Solo números enteros (10.000 -> 10000)
             s_solo_numeros = re.sub(r'\D', '', s)
             return int(s_solo_numeros) if s_solo_numeros else 0
-    except: return 0
+    except: return 0.0
 
 def analizar_factura_v1(archivo_bytes, mime_type):
     url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent?key={API_KEY}"
@@ -99,7 +101,7 @@ else:
     sh = conectar_sheets()
 
     if menu == "📥 Carga Masiva":
-        st.title(f"📥 Carga de Facturas")
+        st.title(f"📥 Carga Masiva")
         files = st.file_uploader("Subir archivos", type=["pdf", "png", "jpg", "jpeg"], accept_multiple_files=True)
         
         if files and st.button(f"Procesar {len(files)} archivos"):
@@ -109,27 +111,48 @@ else:
                 d = analizar_factura_v1(f.getvalue(), f.type)
                 if d:
                     for it in d.get('items', []):
+                        cant = limpiar_monto_py(it.get('cantidad'), True)
+                        unit = limpiar_monto_py(it.get('unitario'))
                         all_items.append({
                             'Fecha': d.get('fecha', ""), 'Proveedor': d.get('proveedor', ""),
                             'Factura': d.get('nro_factura', ""), 'Producto': it.get('producto', ""),
-                            'Cantidad': limpiar_monto_py(it.get('cantidad'), True),
-                            'Unitario': limpiar_monto_py(it.get('unitario')),
-                            'Total': limpiar_monto_py(it.get('total'))
+                            'Cantidad': cant, 'Unitario': unit, 'Total': int(cant * unit)
                         })
                 bar.progress((idx + 1) / len(files))
             st.session_state.batch = pd.DataFrame(all_items)
 
         if not st.session_state.batch.empty:
-            edited = st.data_editor(st.session_state.batch, use_container_width=True)
+            st.info("💡 Al modificar Cantidad o Unitario, el Total se recalculará al guardar.")
+            # Configuración de columnas para permitir decimales en Cantidad
+            edited = st.data_editor(
+                st.session_state.batch, 
+                use_container_width=True,
+                column_config={
+                    "Cantidad": st.column_config.NumberColumn(format="%.2f"),
+                    "Total": st.column_config.NumberColumn(disabled=True) # Bloqueado porque es calculado
+                }
+            )
+            
             if st.button("Guardar en la Nube", type="primary"):
                 ws = obtener_o_crear_pestana(sh, st.session_state.user)
                 df_actual = pd.DataFrame(ws.get_all_records())
-                for _, r in edited.iterrows():
-                    id_u = f"{r['Proveedor']}_{r['Fecha']}_{r['Factura']}_{r['Producto']}".upper().replace(" ", "")
-                    if not df_actual.empty and 'ID_Unico' in df_actual.columns:
-                        if id_u in df_actual['ID_Unico'].astype(str).values: continue
-                    ws.append_row([str(r['Fecha']), str(r['Proveedor']), str(r['Factura']), str(r['Producto']), r['Cantidad'], "u", int(r['Unitario']), int(r['Total']), st.session_state.user, id_u, str(datetime.datetime.now())])
-                st.success("✅ Guardado.")
+                
+                with st.spinner("Guardando..."):
+                    for _, r in edited.iterrows():
+                        # RECALCULO ANTES DE GUARDAR
+                        final_total = int(float(r['Cantidad']) * int(r['Unitario']))
+                        id_u = f"{r['Proveedor']}_{r['Fecha']}_{r['Factura']}_{r['Producto']}".upper().replace(" ", "")
+                        
+                        if not df_actual.empty and 'ID_Unico' in df_actual.columns:
+                            if id_u in df_actual['ID_Unico'].astype(str).values: continue
+                        
+                        ws.append_row([
+                            str(r['Fecha']), str(r['Proveedor']), str(r['Factura']), 
+                            str(r['Producto']), r['Cantidad'], "u", 
+                            int(r['Unitario']), final_total, 
+                            st.session_state.user, id_u, str(datetime.datetime.now())
+                        ])
+                st.success("✅ Guardado con totales recalculados.")
                 st.session_state.batch = pd.DataFrame()
                 st.balloons()
 
@@ -145,32 +168,25 @@ else:
         if not df.empty:
             df['Total'] = pd.to_numeric(df['Total'], errors='coerce').fillna(0)
             st.metric("Inversión Total", f"{df['Total'].sum():,.0f} Gs.")
-            st.plotly_chart(px.pie(df, values='Total', names='Proveedor', title="Inversión por Proveedor", hole=.4), use_container_width=True)
+            st.plotly_chart(px.pie(df, values='Total', names='Proveedor', hole=.4), use_container_width=True)
         else: st.info("Sin datos.")
 
-    # --- MÓDULO 3: HISTORIAL (CON EDICIÓN Y BORRADO) ---
+    # --- MÓDULO 3: HISTORIAL (CON CÁLCULO Y ELIMINACIÓN) ---
     elif menu == "📅 Historial":
         st.title("📅 Gestión del Historial")
         ws = obtener_o_crear_pestana(sh, st.session_state.user)
         df_full = pd.DataFrame(ws.get_all_records())
         
         if not df_full.empty:
-            # Filtros
             col1, col2 = st.columns([2, 2])
-            with col1:
-                search = st.text_input("🔍 Buscar por Producto", "")
-            with col2:
-                fecha_rango = st.date_input("📅 Rango de Fechas", [])
+            with col1: search = st.text_input("🔍 Buscar por Producto", "")
+            with col2: fecha_rango = st.date_input("📅 Rango", [])
 
-            # Preparar visualización
             df_display = df_full.copy()
-            # Convertimos tipos para que el editor los reconozca bien
+            df_display.insert(0, "Eliminar", False)
             df_display['Cantidad'] = pd.to_numeric(df_display['Cantidad'], errors='coerce')
             df_display['Unitario'] = pd.to_numeric(df_display['Unitario'], errors='coerce')
             df_display['Total'] = pd.to_numeric(df_display['Total'], errors='coerce')
-            
-            # Columna para seleccionar eliminación
-            df_display.insert(0, "Eliminar", False)
             
             if search:
                 df_display = df_display[df_display['Producto'].astype(str).str.contains(search, case=False, na=False)]
@@ -180,48 +196,39 @@ else:
                 df_display = df_display[(df_display['Fecha_dt'] >= start) & (df_display['Fecha_dt'] <= end)]
                 df_display.drop(columns=['Fecha_dt'], inplace=True)
             
-            st.info("Para editar: doble clic en la celda. Para borrar: marca el check 'Eliminar'.")
+            st.info("✍️ Al editar Cantidad o Unitario, el Total se actualizará al presionar 'Aplicar Cambios'.")
             
-            # EDITOR: Solo ID_Unico y Usuario son de lectura
             df_edited = st.data_editor(
                 df_display.sort_values(by="Timestamp", ascending=False),
                 use_container_width=True,
-                disabled=["ID_Unico", "Usuario", "Timestamp"],
-                hide_index=True
+                disabled=["ID_Unico", "Usuario", "Timestamp", "Total"], # Total bloqueado para asegurar cálculo
+                hide_index=True,
+                column_config={"Cantidad": st.column_config.NumberColumn(format="%.2f")}
             )
             
             if st.button("💾 Aplicar Cambios y Eliminaciones", type="primary"):
-                with st.spinner("Actualizando base de datos..."):
-                    # 1. Identificar filas a eliminar
-                    ids_a_eliminar = df_edited[df_edited['Eliminar'] == True]['ID_Unico'].values
+                with st.spinner("Sincronizando..."):
+                    # RECALCULAR TOTALES EN EL DATAFRAME EDITADO
+                    df_edited['Total'] = df_edited['Cantidad'] * df_edited['Unitario']
+                    df_edited['Total'] = df_edited['Total'].apply(lambda x: int(round(x)))
                     
-                    # 2. Tomar el dataframe completo original y actualizar con los cambios del editor
-                    # Solo actualizamos las filas que NO fueron marcadas para eliminar
+                    ids_a_eliminar = df_edited[df_edited['Eliminar'] == True]['ID_Unico'].values
                     df_full.set_index('ID_Unico', inplace=True)
                     df_edited_clean = df_edited[df_edited['Eliminar'] == False].drop(columns=['Eliminar'])
                     df_edited_clean.set_index('ID_Unico', inplace=True)
                     
-                    # Actualizar datos existentes
                     df_full.update(df_edited_clean)
                     df_full.reset_index(inplace=True)
-                    
-                    # 3. Eliminar físicamente los registros marcados
                     df_final = df_full[~df_full['ID_Unico'].isin(ids_a_eliminar)]
                     
-                    # 4. Sobreescribir en Google Sheets
                     ws.clear()
                     columnas = ["Fecha", "Proveedor", "Factura", "Producto", "Cantidad", "Medida", "Unitario", "Total", "Usuario", "ID_Unico", "Timestamp"]
-                    # Forzar tipos antes de subir
-                    df_final['Unitario'] = df_final['Unitario'].astype(int)
-                    df_final['Total'] = df_final['Total'].astype(int)
-                    
                     datos_a_subir = [columnas] + df_final[columnas].values.tolist()
                     ws.update('A1', datos_a_subir)
                     
-                st.success(f"✅ ¡Operación exitosa! Se eliminaron {len(ids_a_eliminar)} registros y se actualizaron los demás.")
+                st.success("✅ Cambios aplicados y totales recalculados.")
                 st.rerun()
-        else:
-            st.info("No hay registros.")
+        else: st.info("No hay registros.")
 
     if menu == "🚀 Salir":
         st.session_state.auth = False
