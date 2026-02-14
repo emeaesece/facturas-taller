@@ -10,16 +10,16 @@ from oauth2client.service_account import ServiceAccountCredentials
 # ==========================================
 # ⚙️ 1. CONFIGURACIÓN
 # ==========================================
-st.set_page_config(page_title="Taller Pro - Emergencia", page_icon="🚨", layout="wide")
+st.set_page_config(page_title="Taller Pro - v1 Producción", page_icon="🔧", layout="wide")
 
 try:
     API_KEY = st.secrets["GOOGLE_API_KEY"]
 except:
-    st.error("❌ Falta GOOGLE_API_KEY en Secrets.")
+    st.error("❌ Falta la API Key en los Secrets de Streamlit.")
     st.stop()
 
 # ==========================================
-# ☁️ 2. CONEXIÓN SHEETS
+# ☁️ 2. CONEXIÓN GOOGLE SHEETS
 # ==========================================
 def conectar_sheets():
     try:
@@ -31,25 +31,22 @@ def conectar_sheets():
     except: return None
 
 # ==========================================
-# 🧠 3. MOTOR IA (CONEXIÓN DIRECTA POR HTTP)
+# 🧠 3. MOTOR IA (RUTA v1 PRODUCCIÓN)
 # ==========================================
-def analizar_factura_directo(archivo_bytes, mime_type):
-    # Usamos la URL de producción más estable
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={API_KEY}"
+def analizar_factura_v1(archivo_bytes, mime_type):
+    # CAMBIO CRÍTICO: Usamos /v1/ en lugar de /v1beta/
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={API_KEY}"
     
-    # Codificamos el archivo para enviarlo
     archivo_b64 = base64.b64encode(archivo_bytes).decode('utf-8')
     
+    # Estructura de datos exacta para la API v1
     payload = {
         "contents": [{
             "parts": [
-                {"text": "Analiza esta factura. Devuelve solo un JSON con: fecha (YYYY-MM-DD), proveedor, y una lista de items con (producto, cantidad, unitario, total)."},
+                {"text": "Analiza esta factura de taller mecánico. Extrae y devuelve SOLO un JSON con: fecha (YYYY-MM-DD), proveedor, y una lista de items con (producto, cantidad, unitario, total)."},
                 {"inline_data": {"mime_type": mime_type, "data": archivo_b64}}
             ]
-        }],
-        "generationConfig": {
-            "response_mime_type": "application/json",
-        }
+        }]
     }
     
     headers = {'Content-Type': 'application/json'}
@@ -59,38 +56,49 @@ def analizar_factura_directo(archivo_bytes, mime_type):
         res_json = response.json()
         
         if response.status_code == 200:
-            # Extraemos el texto de la respuesta
             texto_ia = res_json['candidates'][0]['content']['parts'][0]['text']
+            # Limpiamos posibles etiquetas de markdown
+            texto_ia = texto_ia.replace("```json", "").replace("```", "").strip()
             return json.loads(texto_ia)
         else:
-            st.error(f"❌ Error del servidor ({response.status_code}): {res_json.get('error', {}).get('message')}")
+            # Reporte de error detallado
+            msg = res_json.get('error', {}).get('message', 'Error desconocido')
+            st.error(f"❌ Error {response.status_code}: {msg}")
+            if "404" in str(response.status_code):
+                st.warning("⚠️ Google dice que el modelo no existe en esta ruta. Revisa la activación de la API.")
             return None
     except Exception as e:
         st.error(f"❌ Error de conexión: {e}")
         return None
 
 # ==========================================
-# 🖥️ 4. INTERFAZ
+# 🖥️ 4. INTERFAZ DE USUARIO
 # ==========================================
 if 'auth' not in st.session_state: st.session_state.auth = False
 
 if not st.session_state.auth:
-    st.title("🔐 Acceso de Emergencia")
+    st.title("🔐 Acceso Sistema Taller")
     u = st.text_input("Usuario")
-    p = st.text_input("Pass", type="password")
-    if st.button("Entrar"):
+    p = st.text_input("Contraseña", type="password")
+    if st.button("Ingresar", type="primary"):
         st.session_state.auth = True
         st.session_state.user = u
         st.rerun()
 else:
-    menu = st.sidebar.radio("Menú", ["Cargar", "Historial", "Salir"])
-    
-    if menu == "Cargar":
-        f = st.file_uploader("Subir factura", type=["pdf", "png", "jpg", "jpeg"])
-        if f and st.button("Procesar Factura"):
-            with st.spinner("🤖 Intentando conexión directa..."):
-                datos = analizar_factura_directo(f.getvalue(), f.type)
+    with st.sidebar:
+        st.header(f"👤 {st.session_state.user}")
+        menu = st.radio("Menú", ["📥 Cargar Compra", "📊 Historial", "🚀 Salir"])
+
+    if menu == "📥 Cargar Compra":
+        st.title("📥 Registro de Facturas (v1)")
+        f = st.file_uploader("Subir PDF o Imagen", type=["pdf", "png", "jpg", "jpeg"])
+        
+        if f and st.button("Procesar con IA de Producción"):
+            with st.spinner("🤖 Conectando con Google v1..."):
+                datos = analizar_factura_v1(f.getvalue(), f.type)
                 if datos:
+                    st.write("### Datos detectados:")
+                    st.json(datos)
                     sh = conectar_sheets()
                     if sh:
                         ws = sh.worksheet("Gastos")
@@ -101,15 +109,16 @@ else:
                                 "u", i.get('unitario'), i.get('total'),
                                 st.session_state.user, str(datetime.datetime.now())
                             ])
-                        st.success("✅ ¡Registrado con éxito!")
+                        st.success("✅ ¡Guardado en Google Sheets!")
                         st.balloons()
     
-    elif menu == "Historial":
+    elif menu == "📊 Historial":
+        st.title("📊 Base de Datos")
         sh = conectar_sheets()
         if sh:
             df = pd.DataFrame(sh.worksheet("Gastos").get_all_records())
             st.dataframe(df, use_container_width=True)
 
-    if menu == "Salir":
+    if menu == "🚀 Salir":
         st.session_state.auth = False
         st.rerun()
