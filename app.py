@@ -2,249 +2,206 @@ import streamlit as st
 import pandas as pd
 import google.generativeai as genai
 import json
-import io
 import time
-import sqlite3
 import datetime
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 # ==========================================
-# ⚙️ 1. CONFIGURACIÓN
+# ⚙️ 1. CONFIGURACIÓN Y ESTILOS
 # ==========================================
 
-# ¡PEGA TU CLAVE AQUÍ DENTRO DE LAS COMILLAS!
-API_KEY = "AIzaSyDBTsVTGgj9Ne_vQ-wyr9WaT0Zmsfyavbo" 
+st.set_page_config(
+    page_title="Taller Pro Cloud 2026", 
+    page_icon="🔧", 
+    layout="wide"
+)
 
-st.set_page_config(page_title="Sistema Taller Pro", page_icon="🏭", layout="wide")
+# Inyectar un poco de estilo para que se vea mejor en móviles
+st.markdown("""
+    <style>
+    .stButton>button { width: 100%; border-radius: 10px; height: 3em; }
+    </style>
+    """, unsafe_allow_html=True)
+# Recuperar API Key de Gemini
+try:
+    GEMINI_KEY = st.secrets["GOOGLE_API_KEY"]
+except:
+    GEMINI_KEY = "TAIzaSyDBTsVTGgj9Ne_vQ-wyr9WaT0Zmsfyavbo"
 
-if "PEGA_TU_CLAVE" in API_KEY:
-    st.error("⚠️ ERROR CRÍTICO: No has pegado tu API Key en el código.")
-    st.stop()
-
-genai.configure(api_key=API_KEY)
+genai.configure(api_key=GEMINI_KEY)
 
 # ==========================================
-# 🧠 2. DETECTOR AUTOMÁTICO DE MODELO (¡Vital!)
+# ☁️ 2. MOTOR DE GOOGLE SHEETS
 # ==========================================
-def obtener_mejor_modelo():
-    """Pregunta a Google qué modelos tienes y elige el mejor disponible"""
+
+def conectar_sheets():
+    """Establece conexión con la base de datos en la nube"""
     try:
-        modelos = genai.list_models()
-        nombres = [m.name for m in modelos if 'generateContent' in m.supported_generation_methods]
-        
-        # Orden de preferencia (Del más rápido/nuevo al más viejo)
-        prioridades = [
-            'models/gemini-1.5-flash',
-            'models/gemini-1.5-flash-latest',
-            'models/gemini-1.5-flash-001',
-            'models/gemini-1.5-pro',
-            'models/gemini-pro-vision'
-        ]
-        
-        # 1. Buscar coincidencia exacta
-        for p in prioridades:
-            if p in nombres: return p
-            
-        # 2. Buscar cualquiera que sea "flash"
-        for n in nombres:
-            if 'flash' in n: return n
-            
-        # 3. Fallback: El primero que encuentre
-        if nombres: return nombres[0]
-        
-        return 'models/gemini-1.5-flash' # Por defecto si todo falla
+        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        # Nombre exacto de tu archivo en Drive
+        return client.open("BaseDatos_Taller")
+    except Exception as e:
+        st.error(f"Error de conexión con Google Sheets: {e}")
+        return None
+
+def check_login(u, p):
+    """Verifica credenciales en la pestaña 'Usuarios'"""
+    try:
+        sh = conectar_sheets()
+        ws = sh.worksheet("Usuarios")
+        usuarios = ws.get_all_records()
+        for user in usuarios:
+            if str(user['username']) == str(u) and str(user['password']) == str(p):
+                return True
+        return False
     except:
-        return 'models/gemini-1.5-flash'
+        return False
 
-# Guardamos el nombre del modelo correcto al iniciar
-MODELO_ACTUAL = obtener_mejor_modelo()
-
-# ==========================================
-# 🗄️ 3. BASE DE DATOS (SQLITE)
-# ==========================================
-def init_db():
-    conn = sqlite3.connect('taller_data.db')
-    c = conn.cursor()
-    
-    # Tabla Usuarios
-    c.execute('''CREATE TABLE IF NOT EXISTS usuarios 
-                 (username TEXT PRIMARY KEY, password TEXT, rol TEXT)''')
-    
-    # Tabla Gastos
-    c.execute('''CREATE TABLE IF NOT EXISTS gastos 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                  fecha TEXT, proveedor TEXT, producto TEXT, cantidad REAL, 
-                  unidad TEXT, precio_unitario REAL, precio_total REAL, 
-                  usuario TEXT, fecha_carga TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    
-    # Usuario Admin por defecto
-    c.execute("INSERT OR IGNORE INTO usuarios VALUES ('admin', 'admin123', 'gerente')")
-    
-    conn.commit()
-    conn.close()
-
-def guardar_item_db(item, usuario):
-    conn = sqlite3.connect('taller_data.db')
-    c = conn.cursor()
+def guardar_en_nube(item, usuario):
+    """Inserta una fila en la pestaña 'Gastos'"""
     try:
-        c.execute('''INSERT INTO gastos (fecha, proveedor, producto, cantidad, unidad, precio_unitario, precio_total, usuario)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
-                  (item['Fecha'], item['Proveedor'], item['Producto'], item['Cantidad'], 
-                   item['Unidad'], item['Precio Unitario'], item['Precio Total'], usuario))
-        conn.commit()
+        sh = conectar_sheets()
+        ws = sh.worksheet("Gastos")
+        fila = [
+            item['Fecha'], item['Proveedor'], item['Producto'], 
+            item['Cantidad'], item['Unidad'], item['Precio Unitario'], 
+            item['Precio Total'], usuario, str(datetime.datetime.now())
+        ]
+        ws.append_row(fila)
         return True
     except Exception as e:
-        st.error(f"Error guardando en BD: {e}")
+        st.error(f"Error al guardar: {e}")
         return False
-    finally:
-        conn.close()
-
-def obtener_reporte_db(usuario, filtro=None):
-    conn = sqlite3.connect('taller_data.db')
-    query = "SELECT fecha, proveedor, producto, cantidad, unidad, precio_unitario, precio_total FROM gastos"
-    if filtro:
-        query += f" WHERE producto LIKE '%{filtro}%' OR proveedor LIKE '%{filtro}%'"
-    query += " ORDER BY fecha DESC"
-    df = pd.read_sql_query(query, conn)
-    conn.close()
-    return df
-
-init_db()
 
 # ==========================================
-# 🔍 4. PROCESAMIENTO IA
+# 🧠 3. MOTOR DE INTELIGENCIA ARTIFICIAL
 # ==========================================
-def analizar_documento(archivo_bytes, mime_type):
-    # Usamos la variable global MODELO_ACTUAL que detectamos al principio
-    model = genai.GenerativeModel(MODELO_ACTUAL)
+
+def analizar_factura(archivo_bytes, mime_type):
+    """Extrae datos usando Gemini 1.5 Flash"""
+    # Usamos el nombre de modelo más compatible
+    model = genai.GenerativeModel('gemini-1.5-flash')
     
     prompt = """
-    Analiza esta factura de taller. Extrae los items.
-    
-    INSTRUCCIONES:
-    1. Mantén precios y cantidades como NÚMEROS (floats).
-    2. Devuelve SOLO JSON válido.
-    
-    ESTRUCTURA:
+    Extrae los items de esta factura de taller. 
+    Devuelve un JSON estrictamente con este formato:
     {
-        "fecha_compra": "YYYY-MM-DD", 
-        "proveedor": "Nombre Empresa",
+        "fecha": "YYYY-MM-DD",
+        "proveedor": "Nombre",
         "items": [
-            {
-                "producto": "Descripción",
-                "cantidad": 0.0,
-                "unidad": "uni/kg/lt",
-                "precio_unitario": 0.0,
-                "precio_total": 0.0
-            }
+            {"producto": "Desc", "cantidad": 0.0, "unidad": "u", "unitario": 0.0, "total": 0.0}
         ]
     }
     """
     try:
         response = model.generate_content([prompt, {"mime_type": mime_type, "data": archivo_bytes}])
-        texto = response.text
-        # Limpieza
-        texto_limpio = texto.replace("```json", "").replace("```", "").strip()
-        inicio = texto_limpio.find('{')
-        fin = texto_limpio.rfind('}') + 1
-        
-        if inicio != -1 and fin != -1:
-            return json.loads(texto_limpio[inicio:fin])
-        else:
-            st.error(f"❌ Error de lectura IA. Respuesta:\n{texto}")
-            return None
-    except Exception as e:
-        st.error(f"❌ Error de Conexión: {str(e)}")
+        # Limpiar respuesta para obtener solo el JSON
+        raw_text = response.text.strip().replace("```json", "").replace("```", "")
+        start = raw_text.find("{")
+        end = raw_text.rfind("}") + 1
+        return json.loads(raw_text[start:end])
+    except:
         return None
 
 # ==========================================
-# 🔐 5. LOGIN Y UI
+# 🖥️ 4. INTERFAZ DE USUARIO (UI)
 # ==========================================
-if 'logged_in' not in st.session_state:
-    st.session_state.logged_in = False
-    st.session_state.user = None
 
-def check_login(u, p):
-    conn = sqlite3.connect('taller_data.db')
-    res = conn.cursor().execute("SELECT * FROM usuarios WHERE username = ? AND password = ?", (u, p)).fetchone()
-    conn.close()
-    return res is not None
+if 'sesion' not in st.session_state:
+    st.session_state.sesion = False
 
-# --- PANTALLA LOGIN ---
-if not st.session_state.logged_in:
-    col1, col2, col3 = st.columns([1,2,1])
+# --- PANTALLA DE ACCESO ---
+if not st.session_state.sesion:
+    col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.title("🔐 Acceso Taller")
-        # Mostramos qué modelo se detectó para estar seguros
-        st.caption(f"🤖 Motor IA detectado: {MODELO_ACTUAL}") 
+        st.title("🔐 Gestión Taller Cloud")
+        user_in = st.text_input("Usuario")
+        pass_in = st.text_input("Contraseña", type="password")
         
-        u = st.text_input("Usuario")
-        p = st.text_input("Contraseña", type="password")
-        if st.button("Ingresar", type="primary", use_container_width=True):
-            if check_login(u, p):
-                st.session_state.logged_in = True
-                st.session_state.user = u
+        # Uso de width='stretch' según requerimiento 2026
+        if st.button("Entrar al Sistema", type="primary", width='stretch'):
+            if check_login(user_in, pass_in):
+                st.session_state.sesion = True
+                st.session_state.user = user_in
                 st.rerun()
             else:
-                st.error("Datos incorrectos. (Prueba: admin / admin123)")
+                st.error("Credenciales incorrectas")
 
-# --- PANTALLA SISTEMA ---
+# --- PANTALLA PRINCIPAL ---
 else:
     with st.sidebar:
-        st.success(f"👤 {st.session_state.user}")
-        if st.button("Cerrar Sesión"):
-            st.session_state.logged_in = False
-            st.rerun()
-        st.divider()
-        menu = st.radio("Navegación", ["📥 Cargar Facturas", "📊 Historial y Precios"])
-
-    if menu == "📥 Cargar Facturas":
-        st.title("📥 Cargar Compras")
-        archivos = st.file_uploader("Sube facturas", type=["pdf", "png", "jpg"], accept_multiple_files=True)
+        st.header(f"👤 {st.session_state.user}")
+        menu = st.radio("Menu", ["📥 Cargar Compra", "📊 Historial", "🚀 Salir"])
         
-        if archivos and st.button("Procesar Archivos", type="primary"):
+        if menu == "🚀 Salir":
+            st.session_state.sesion = False
+            st.rerun()
+
+    # --- MÓDULO CARGA ---
+    if menu == "📥 Cargar Compra":
+        st.title("📥 Digitalizar Factura")
+        files = st.file_uploader("Sube fotos o PDFs", accept_multiple_files=True)
+        
+        if files and st.button("Analizar y Guardar", type="primary", width='stretch'):
             bar = st.progress(0)
-            total = 0
-            for i, arch in enumerate(archivos):
-                bar.progress((i+1)/len(archivos))
-                datos = analizar_documento(arch.getvalue(), arch.type)
+            status = st.empty()
+            count = 0
+            
+            for i, f in enumerate(files):
+                bar.progress((i+1)/len(files))
+                status.write(f"⚙️ Procesando: {f.name}...")
                 
-                if datos and "items" in datos:
-                    fecha = datos.get("fecha_compra", str(datetime.date.today()))
-                    prov = datos.get("proveedor", "Sin Proveedor")
-                    for item in datos["items"]:
-                        item_db = {
-                            "Fecha": fecha, "Proveedor": prov,
-                            "Producto": item.get("producto", "Item"),
-                            "Cantidad": float(item.get("cantidad", 0)),
+                data = analizar_factura(f.getvalue(), f.type)
+                if data:
+                    fecha_f = data.get("fecha", str(datetime.date.today()))
+                    prov_f = data.get("proveedor", "Desconocido")
+                    
+                    for item in data.get("items", []):
+                        obj = {
+                            "Fecha": fecha_f, "Proveedor": prov_f,
+                            "Producto": item.get("producto"),
+                            "Cantidad": item.get("cantidad", 0),
                             "Unidad": item.get("unidad", "u"),
-                            "Precio Unitario": float(item.get("precio_unitario", 0)),
-                            "Precio Total": float(item.get("precio_total", 0))
+                            "Precio Unitario": item.get("unitario", 0),
+                            "Precio Total": item.get("total", 0)
                         }
-                        if guardar_item_db(item_db, st.session_state.user): total += 1
+                        if guardar_en_nube(obj, st.session_state.user):
+                            count += 1
                 time.sleep(1)
             
-            if total > 0: st.success(f"✅ Se guardaron {total} items.")
-            else: st.warning("No se encontraron items.")
+            status.empty()
+            st.success(f"✅ ¡Hecho! Se registraron {count} items en Google Sheets.")
 
-    elif menu == "📊 Historial y Precios":
-        st.title("📊 Historial")
-        filtro = st.text_input("🔍 Buscar repuesto...")
-        df = obtener_reporte_db(st.session_state.user, filtro)
+    # --- MÓDULO HISTORIAL ---
+    elif menu == "📊 Historial":
+        st.title("📊 Consultar Precios")
+        search = st.text_input("🔍 Buscar repuesto o proveedor...")
         
-        if not df.empty:
-            st.dataframe(
-                df, 
-                column_config={
-                    "precio_total": st.column_config.NumberColumn("Total", format="$ %.2f"),
-                    "precio_unitario": st.column_config.NumberColumn("Unitario", format="$ %.2f"),
-                    "fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
-                }, 
-                use_container_width=True
-            )
+        try:
+            sh = conectar_sheets()
+            ws = sh.worksheet("Gastos")
+            df = pd.DataFrame(ws.get_all_records())
             
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                df.to_excel(writer, index=False)
-            st.download_button("📥 Excel", buffer, "historial.xlsx")
-        else:
-            st.info("Sin datos.")
+            if not df.empty:
+                if search:
+                    df = df[df.apply(lambda r: r.astype(str).str.contains(search, case=False).any(), axis=1)]
+                
+                # Visualización con ancho elástico para 2026
+                st.dataframe(
+                    df, 
+                    column_config={
+                        "Precio Total": st.column_config.NumberColumn(format="$ %.2f"),
+                        "Precio Unitario": st.column_config.NumberColumn(format="$ %.2f"),
+                        "Fecha": st.column_config.DateColumn()
+                    },
+                    width='stretch'
+                )
+            else:
+                st.info("No hay datos cargados todavía.")
+        except:
+            st.error("No se pudo leer la base de datos.")
