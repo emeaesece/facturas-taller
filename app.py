@@ -11,39 +11,37 @@ from oauth2client.service_account import ServiceAccountCredentials
 # ==========================================
 # ⚙️ 1. CONFIGURACIÓN Y ESTILOS
 # ==========================================
-st.set_page_config(page_title="Taller Pro Cloud 2026", page_icon="🔧", layout="wide")
+st.set_page_config(page_title="Taller Cloud 2026", page_icon="🔧", layout="wide")
 
-# Estilo para botones y tablas elásticas
 st.markdown("""
     <style>
     .stButton>button { width: 100%; border-radius: 10px; height: 3.5em; font-weight: bold; }
+    .stDataFrame { border-radius: 10px; }
     </style>
     """, unsafe_allow_html=True)
 
-# Inicialización de IA forzando Versión v1 (Evita el error 404)
+# Inicialización de la IA (Sin forzar versión para evitar el 404)
 try:
     api_key_env = st.secrets["GOOGLE_API_KEY"]
-    client_ia = genai.Client(
-        api_key=api_key_env,
-        http_options={'api_version': 'v1'} # Ruta de producción estable
-    )
+    client_ia = genai.Client(api_key=api_key_env)
 except Exception as e:
-    st.error("❌ Error: No se encontró GOOGLE_API_KEY en Secrets.")
+    st.error("❌ ERROR: No se encontró GOOGLE_API_KEY en los Secrets.")
     st.stop()
 
 # ==========================================
-# ☁️ 2. MOTOR DE BASE DE DATOS
+# ☁️ 2. CONEXIÓN A GOOGLE SHEETS
 # ==========================================
 def conectar_sheets():
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        # Buscamos la sección gcp_service_account en los Secrets
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         gc = gspread.authorize(creds)
         return gc.open("BaseDatos_Taller")
     except Exception as e:
-        st.error(f"Error Sheets: {e}")
+        st.error(f"⚠️ Error de conexión con Sheets: {e}")
         return None
 
 def check_login(u, p):
@@ -57,122 +55,118 @@ def check_login(u, p):
     except: return False
 
 # ==========================================
-# 🧠 3. MOTOR IA Y LIMPIEZA DE NÚMEROS
+# 🧠 3. MOTOR DE IA CON FALLBACK (ANTI-404)
 # ==========================================
 def limpiar_monto_py(valor):
-    """Maneja formatos como 1.500.000 o 1.500,50"""
+    """Limpia formatos: 1.500.000 / 1.500,50 / 1500.50"""
     if not valor: return 0.0
     try:
-        s = str(valor).upper().replace('GS', '').replace('$', '').strip()
-        # Si hay puntos y comas (1.234,56), quitamos puntos y cambiamos coma por punto
-        if '.' in s and ',' in s:
-            s = s.replace('.', '').replace(',', '.')
-        # Si solo hay puntos (1.500.000), los quitamos
-        elif '.' in s and ',' not in s:
-            # Caso especial: ¿es decimal (1.50) o miles (1.500)? 
-            # Si hay 3 dígitos después del punto, es miles.
+        s = str(valor).upper().replace('GS', '').replace('$', '').replace(' ', '').strip()
+        # Caso 1.250.000 (miles con punto)
+        if '.' in s and ',' not in s:
             partes = s.split('.')
             if len(partes[-1]) == 3: s = s.replace('.', '')
-        # Si solo hay coma (1500,50), la cambiamos por punto
+        # Caso 1.250,50 (miles con punto, decimal con coma)
+        elif '.' in s and ',' in s:
+            s = s.replace('.', '').replace(',', '.')
+        # Caso 1250,50 (decimal con coma)
         elif ',' in s:
             s = s.replace(',', '.')
         return float(s)
     except: return 0.0
 
 def analizar_factura(archivo_bytes, mime_type):
-    # Prompt reforzado
-    prompt = """Analiza esta factura. Extrae un JSON con: 
+    # Lista de modelos compatibles 2026
+    modelos = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-latest"]
+    prompt = """Analiza esta factura. Extrae en un JSON: 
     {
       "fecha": "YYYY-MM-DD", 
       "proveedor": "Nombre", 
       "items": [{"producto": "desc", "cantidad": 1, "unitario": 0, "total": 0}]
     }
-    Devuelve SOLO el JSON sin texto extra."""
+    Devuelve SOLO el JSON, sin explicaciones."""
     
-    try:
-        # Usamos la sintaxis más compatible para evitar el error 400
-        response = client_ia.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=[
-                prompt,
-                types.Part.from_bytes(data=archivo_bytes, mime_type=mime_type)
-            ]
-        )
-        # Limpieza manual de la respuesta (más seguro que forzarlo en config)
-        res_text = response.text.strip()
-        if "```json" in res_text:
-            res_text = res_text.split("```json")[1].split("```")[0]
-        elif "```" in res_text:
-            res_text = res_text.split("```")[1].split("```")[0]
+    for mod in modelos:
+        try:
+            response = client_ia.models.generate_content(
+                model=mod,
+                contents=[
+                    prompt,
+                    types.Part.from_bytes(data=archivo_bytes, mime_type=mime_type)
+                ]
+            )
+            # Limpiar respuesta por si la IA incluye markdown
+            txt = response.text.strip()
+            if "```json" in txt: txt = txt.split("```json")[1].split("```")[0]
+            elif "```" in txt: txt = txt.split("```")[1].split("```")[0]
             
-        return json.loads(res_text)
-    except Exception as e:
-        st.error(f"Error en comunicación con IA: {e}")
-        return None
+            return json.loads(txt)
+        except Exception as e:
+            if "404" in str(e): continue # Probar siguiente modelo
+            st.error(f"Error con modelo {mod}: {e}")
+            return None
+    return None
 
 # ==========================================
-# 🖥️ 4. INTERFAZ DE USUARIO
+# 🖥️ 4. INTERFAZ DE USUARIO (UI)
 # ==========================================
 if 'sesion' not in st.session_state: st.session_state.sesion = False
 
 if not st.session_state.sesion:
     st.title("🔐 Acceso Taller Cloud")
-    col1, col2 = st.columns(2)
-    u = col1.text_input("Usuario")
-    p = col2.text_input("Contraseña", type="password")
-    if st.button("Ingresar", type="primary", width='stretch'):
+    u = st.text_input("Usuario")
+    p = st.text_input("Contraseña", type="password")
+    if st.button("Ingresar Sistema", type="primary"):
         if check_login(u, p):
             st.session_state.sesion = True
             st.session_state.user = u
             st.rerun()
-        else: st.error("Acceso denegado.")
+        else: st.error("Credenciales incorrectas.")
 else:
     with st.sidebar:
-        st.header(f"🔧 {st.session_state.user}")
-        opc = st.radio("Menú", ["📥 Cargar Compra", "📊 Ver Historial", "🚀 Salir"])
+        st.header(f"👤 {st.session_state.user}")
+        menu = st.radio("Menú", ["📥 Cargar Factura", "📊 Ver Historial", "🚀 Salir"])
 
-    if opc == "📥 Cargar Compra":
-        st.title("📥 Registro de Facturas")
+    if menu == "📥 Cargar Factura":
+        st.title("📥 Registro de Compras")
         f = st.file_uploader("Subir PDF o Imagen", type=["pdf", "png", "jpg", "jpeg"])
         
-        if f and st.button("Analizar y Guardar", type="primary", width='stretch'):
-            with st.spinner("🤖 Procesando documento..."):
+        if f and st.button("Procesar Factura", type="primary"):
+            with st.spinner("🧠 Analizando con IA..."):
                 datos = analizar_factura(f.getvalue(), f.type)
                 if datos and "items" in datos:
-                    st.write("### Datos extraídos:")
+                    st.write("### Datos detectados:")
                     st.json(datos)
                     
                     sh = conectar_sheets()
-                    ws = sh.worksheet("Gastos")
-                    count = 0
-                    
-                    for i in datos["items"]:
-                        # Aplicar limpieza de números de Paraguay
-                        c = limpiar_monto_py(i.get("cantidad", 1))
-                        u_p = limpiar_monto_py(i.get("unitario", 0))
-                        t = limpiar_monto_py(i.get("total", 0))
-                        
-                        ws.append_row([
-                            datos.get("fecha", ""),
-                            datos.get("proveedor", ""),
-                            i.get("producto", ""),
-                            c, "u", u_p, t,
-                            st.session_state.user,
-                            str(datetime.datetime.now())
-                        ])
-                        count += 1
-                    st.success(f"✅ Se guardaron {count} items en la nube.")
+                    if sh:
+                        ws = sh.worksheet("Gastos")
+                        count = 0
+                        for i in datos["items"]:
+                            # Guardar fila con números limpios
+                            ws.append_row([
+                                datos.get("fecha", ""),
+                                datos.get("proveedor", ""),
+                                i.get("producto", ""),
+                                limpiar_monto_py(i.get("cantidad")),
+                                "u",
+                                limpiar_monto_py(i.get("unitario")),
+                                limpiar_monto_py(i.get("total")),
+                                st.session_state.user,
+                                str(datetime.datetime.now())
+                            ])
+                            count += 1
+                        st.success(f"✅ ¡Guardado! {count} items registrados.")
                 else:
-                    st.error("No se detectaron items. Revisa que el archivo sea legible.")
+                    st.error("No se detectó información. Intenta con una imagen más clara.")
 
-    elif opc == "📊 Ver Historial":
+    elif menu == "Ver Historial":
         st.title("📊 Base de Datos")
-        try:
-            sh = conectar_sheets()
+        sh = conectar_sheets()
+        if sh:
             df = pd.DataFrame(sh.worksheet("Gastos").get_all_records())
-            st.dataframe(df, width='stretch')
-        except: st.info("No hay datos cargados.")
-        
-    if opc == "🚀 Salir":
+            st.dataframe(df, use_container_width=True)
+            
+    if menu == "🚀 Salir":
         st.session_state.sesion = False
         st.rerun()
