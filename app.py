@@ -12,7 +12,7 @@ import re
 # ==========================================
 # ⚙️ 1. CONFIGURACIÓN
 # ==========================================
-st.set_page_config(page_title="Taller Pro - Gestión de Activos", page_icon="🔧", layout="wide")
+st.set_page_config(page_title="Taller Pro - v29 Edición", page_icon="🔧", layout="wide")
 
 if 'batch' not in st.session_state:
     st.session_state.batch = pd.DataFrame()
@@ -133,7 +133,7 @@ else:
                 st.session_state.batch = pd.DataFrame()
                 st.balloons()
 
-    # --- MÓDULO 2: DASHBOARD (REPARADO) ---
+    # --- MÓDULO 2: DASHBOARD ---
     elif menu == "📊 Dashboard":
         st.title("📊 Indicadores de Gestión")
         dfs = []
@@ -141,60 +141,81 @@ else:
             if h.title.startswith("Gasto-"):
                 data = h.get_all_records()
                 if data: dfs.append(pd.DataFrame(data))
-        
         df = pd.concat(dfs) if dfs else pd.DataFrame()
 
         if not df.empty:
-            # Asegurar tipos de datos numéricos para el gráfico
             df['Total'] = pd.to_numeric(df['Total'], errors='coerce').fillna(0)
             df['Fecha'] = pd.to_datetime(df['Fecha'], errors='coerce')
-            
             c1, c2 = st.columns(2)
             c1.metric("Inversión Total", f"{df['Total'].sum():,.0f} Gs.")
             c2.metric("Registros Totales", len(df))
-
-            st.markdown("---")
-            # Gráfico de Gasto por Proveedor
-            fig_pie = px.pie(df, values='Total', names='Proveedor', title="Inversión por Proveedor", hole=.4)
-            st.plotly_chart(fig_pie, use_container_width=True)
-
-            # Evolución Temporal
+            st.plotly_chart(px.pie(df, values='Total', names='Proveedor', title="Inversión por Proveedor", hole=.4), use_container_width=True)
             df_time = df.groupby(df['Fecha'].dt.strftime('%Y-%m'))['Total'].sum().reset_index()
-            fig_line = px.line(df_time, x='Fecha', y='Total', title="Tendencia Mensual de Gastos", markers=True)
-            st.plotly_chart(fig_line, use_container_width=True)
-        else:
-            st.info("No hay datos suficientes para mostrar el Dashboard.")
+            st.plotly_chart(px.line(df_time, x='Fecha', y='Total', title="Tendencia Mensual", markers=True), use_container_width=True)
+        else: st.info("Sin datos suficientes.")
 
-    # --- MÓDULO 3: HISTORIAL (CON FILTROS Y BUSCADOR) ---
+    # --- MÓDULO 3: HISTORIAL (CON EDICIÓN DIRECTA) ---
     elif menu == "📅 Historial":
-        st.title("📅 Historial de Gastos")
+        st.title("📅 Historial y Corrección de Datos")
         ws = obtener_o_crear_pestana(sh, st.session_state.user)
-        df = pd.DataFrame(ws.get_all_records())
+        # Cargamos los datos crudos para no perder nada al filtrar
+        df_full = pd.DataFrame(ws.get_all_records())
         
-        if not df.empty:
-            df['Fecha'] = pd.to_datetime(df['Fecha'], errors='coerce')
-            
-            # Filtros superiores
+        if not df_full.empty:
+            # Filtros y Buscador
             col1, col2 = st.columns([2, 2])
             with col1:
                 search = st.text_input("🔍 Buscar por Producto", "")
             with col2:
                 fecha_rango = st.date_input("📅 Rango de Fechas", [])
 
-            # Aplicar Buscador
-            if search:
-                df = df[df['Producto'].astype(str).str.contains(search, case=False, na=False)]
+            # Creamos una copia para visualizar/filtrar
+            df_display = df_full.copy()
+            df_display['Fecha'] = pd.to_datetime(df_display['Fecha'], errors='coerce')
             
-            # Aplicar Filtro de Fecha
+            if search:
+                df_display = df_display[df_display['Producto'].astype(str).str.contains(search, case=False, na=False)]
             if len(fecha_rango) == 2:
                 start, end = fecha_rango
-                df = df[(df['Fecha'].dt.date >= start) & (df['Fecha'].dt.date <= end)]
+                df_display = df_display[(df_display['Fecha'].dt.date >= start) & (df_display['Fecha'].dt.date <= end)]
             
-            st.markdown("---")
-            st.dataframe(df.sort_values(by="Fecha", ascending=False), use_container_width=True)
-            st.info(f"Subtotal en vista actual: **{df['Total'].sum():,.0f} Gs.**")
+            st.warning("⚠️ Los cambios realizados en la tabla de abajo se guardarán permanentemente en Google Sheets.")
+            
+            # EDITOR DE DATOS: Permite modificar registros existentes
+            # Nota: Bloqueamos ID_Unico y Timestamp para seguridad
+            df_edited = st.data_editor(
+                df_display.sort_values(by="Fecha", ascending=False),
+                use_container_width=True,
+                disabled=["Usuario", "ID_Unico", "Timestamp"] 
+            )
+            
+            if st.button("💾 Guardar Cambios en la Nube", type="primary"):
+                with st.spinner("Sincronizando con Google Sheets..."):
+                    # 1. Obtenemos todos los registros (por si hubo cambios en paralelo)
+                    # 2. Reemplazamos los datos en la hoja
+                    # Para simplificar y asegurar consistencia, sobreescribimos la pestaña
+                    # con el dataframe actualizado.
+                    
+                    # Primero combinamos los cambios del editor con el dataframe completo
+                    df_full.set_index('ID_Unico', inplace=True)
+                    df_edited_copy = df_edited.copy()
+                    df_edited_copy.set_index('ID_Unico', inplace=True)
+                    
+                    df_full.update(df_edited_copy)
+                    df_full.reset_index(inplace=True)
+                    
+                    # Limpiamos la hoja y subimos el nuevo set de datos
+                    ws.clear()
+                    # Reinsertamos encabezados
+                    columnas = ["Fecha", "Proveedor", "Factura", "Producto", "Cantidad", "Medida", "Unitario", "Total", "Usuario", "ID_Unico", "Timestamp"]
+                    # Preparamos los datos para subir
+                    datos_a_subir = [columnas] + df_full[columnas].values.tolist()
+                    ws.update('A1', datos_a_subir)
+                    
+                st.success("✅ ¡Base de datos actualizada correctamente!")
+                st.rerun()
         else:
-            st.info("No hay registros en esta pestaña.")
+            st.info("No hay registros cargados.")
 
     if menu == "🚀 Salir":
         st.session_state.auth = False
