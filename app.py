@@ -24,7 +24,8 @@ elif "GEMINI_KEY" in st.secrets:
 
 if api_key_env:
     try:
-        client_ia = genai.Client(api_key=api_key_env)
+        # Forzamos la versión v1 que es la más estable para producción
+        client_ia = genai.Client(api_key=api_key_env, http_options={'api_version': 'v1'})
     except Exception as e:
         st.error(f"❌ Error al inicializar el cliente de IA: {e}")
         st.stop()
@@ -57,24 +58,19 @@ def conectar_sheets():
 # 🧠 3. MOTOR IA (NUEVO SDK google.genai)
 # ==========================================
 def analizar_factura(archivo_bytes, mime_type):
-    prompt = """Analiza esta factura de taller. Extrae en JSON: fecha (YYYY-MM-DD), 
-    proveedor, y lista de items con (producto, cantidad, unitario, total). 
-    Si los números tienen puntos de miles (1.500.000), límpialos para que sean solo números."""
-    
+    # Usamos el alias corto 'gemini-1.5-flash' o solo 'flash'
     try:
-        # Nueva forma de llamar a Gemini en 2026
         response = client_ia.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=prompt,
-            config={'response_mime_type': 'application/json'} # Forzamos JSON nativo
+            model="gemini-1.5-flash", # Prueba cambiar a "gemini-1.5-flash" (sin v1beta)
+            contents=[
+                "Analiza esta factura y extrae los datos en JSON: fecha, proveedor, items (producto, cantidad, unitario, total).",
+                {"mime_type": mime_type, "data": archivo_bytes}
+            ],
+            config={'response_mime_type': 'application/json'}
         )
-        
-        # El nuevo SDK devuelve el JSON más limpio
         return json.loads(response.text)
-        
     except Exception as e:
         st.error(f"❌ Error de Llave o Conexión: {e}")
-        st.info("Verifica que tu API KEY sea válida en Google AI Studio.")
         return None
 
 # ==========================================
@@ -129,4 +125,5 @@ else:
     if menu == "Salir":
         st.session_state.auth = False
         st.rerun()
+
 
