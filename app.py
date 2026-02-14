@@ -11,7 +11,7 @@ import plotly.express as px
 # ==========================================
 # ⚙️ 1. CONFIGURACIÓN
 # ==========================================
-st.set_page_config(page_title="Taller Pro - Gestión Multi-User", page_icon="🔐", layout="wide")
+st.set_page_config(page_title="Taller Pro - Gestión Inteligente", page_icon="🔧", layout="wide")
 
 try:
     API_KEY = st.secrets["GOOGLE_API_KEY"]
@@ -20,7 +20,7 @@ except:
     st.stop()
 
 # ==========================================
-# ☁️ 2. CONEXIÓN Y GESTIÓN DE PESTAÑAS
+# ☁️ 2. CONEXIÓN Y UTILIDADES
 # ==========================================
 def conectar_sheets():
     try:
@@ -33,12 +33,10 @@ def conectar_sheets():
     except: return None
 
 def obtener_o_crear_pestana(sh, nombre_usuario):
-    """Asegura que cada usuario tenga su pestaña propia: Gasto-usuario"""
     nombre_hoja = f"Gasto-{nombre_usuario}"
     try:
         return sh.worksheet(nombre_hoja)
     except gspread.exceptions.WorksheetNotFound:
-        # Si no existe, la creamos con los encabezados
         ws = sh.add_worksheet(title=nombre_hoja, rows="1000", cols="20")
         columnas = ["Fecha", "Proveedor", "Factura", "Producto", "Cantidad", "Medida", "Unitario", "Total", "Usuario", "ID_Unico", "Timestamp"]
         ws.insert_row(columnas, 1)
@@ -49,13 +47,13 @@ def check_login(u, p):
         sh = conectar_sheets()
         ws = sh.worksheet("Usuarios")
         for row in ws.get_all_records():
-            if str(row['username']) == str(u) and str(row['password']) == str(p):
-                return row.get('rol', 'usuario') # Retorna 'admin' o 'usuario'
+            if str(row['username']).lower() == str(u).lower() and str(row['password']) == str(p):
+                return row.get('rol', 'usuario')
         return None
     except: return None
 
 # ==========================================
-# 🧠 3. MOTOR DE MONEDA (PARAGUAY PRO)
+# 🧠 3. MOTOR DE MONEDA (PARAGUAY FIXED)
 # ==========================================
 def limpiar_monto_py(valor, es_cantidad=False):
     if not valor: return 0
@@ -68,6 +66,7 @@ def limpiar_monto_py(valor, es_cantidad=False):
                 s = "".join(partes[:-1]) + "." + partes[-1]
             return float(s)
         else:
+            # Eliminamos .00 o ,00 que confunden al Guaraní
             if s.endswith(',00') or s.endswith('.00'): s = s[:-3]
             elif s.endswith(',0') or s.endswith('.0'): s = s[:-2]
             s = s.replace('.', '').replace(',', '')
@@ -116,7 +115,7 @@ else:
 
     # --- MÓDULO 1: CARGA ---
     if menu == "📥 Cargar Factura":
-        st.title(f"📥 Nueva Carga para: Gasto-{st.session_state.user}")
+        st.title(f"📥 Nueva Carga")
         f = st.file_uploader("Subir factura", type=["pdf", "png", "jpg", "jpeg"])
         
         if f and st.button("Procesar Documento"):
@@ -134,63 +133,115 @@ else:
             f_ed = st.text_input("Fecha", t['f'])
             p_ed = st.text_input("Proveedor", t['p'])
             n_ed = st.text_input("Nro. Factura", t['n'])
+            # Renombramos columnas para que coincidan con Sheets
+            t['df'].columns = ["Producto", "Cantidad", "Unitario", "Total"]
             edit_df = st.data_editor(t['df'], use_container_width=True)
             
             if st.button("Confirmar y Guardar", type="primary"):
                 sh = conectar_sheets()
                 ws = obtener_o_crear_pestana(sh, st.session_state.user)
-                
-                # Cargar datos actuales para evitar duplicados en SU pestaña
                 existentes = pd.DataFrame(ws.get_all_records())
                 
                 for _, row in edit_df.iterrows():
-                    id_u = f"{p_ed}_{f_ed}_{n_ed}_{row['producto']}".upper().replace(" ", "")
-                    if not existentes.empty and id_u in existentes['ID_Unico'].values:
-                        st.warning(f"⚠️ El producto '{row['producto']}' ya fue cargado por ti en esta factura.")
-                        continue
+                    id_u = f"{p_ed}_{f_ed}_{n_ed}_{row['Producto']}".upper().replace(" ", "")
+                    if not existentes.empty and 'ID_Unico' in existentes.columns:
+                        if id_u in existentes['ID_Unico'].values:
+                            st.warning(f"⚠️ El producto '{row['Producto']}' ya existe.")
+                            continue
                     
-                    ws.append_row([f_ed, p_ed, n_ed, row['producto'], row['cantidad'], "u", row['unitario'], row['total'], st.session_state.user, id_u, str(datetime.datetime.now())])
+                    ws.append_row([f_ed, p_ed, n_ed, row['Producto'], row['Cantidad'], "u", row['Unitario'], row['Total'], st.session_state.user, id_u, str(datetime.datetime.now())])
                 
                 st.success("✅ Guardado en tu pestaña personal.")
                 st.session_state.temp = None
                 st.balloons()
 
-    # --- MÓDULO 2: DASHBOARD (INTELIGENTE) ---
+    # --- MÓDULO 2: DASHBOARD (CORREGIDO) ---
     elif menu == "📊 Dashboard":
         st.title("📊 Análisis de Gastos")
         sh = conectar_sheets()
         
-        # El ADMIN puede elegir qué ver
+        todas = []
         if st.session_state.rol == "admin":
-            st.info("Eres Administrador: Puedes ver el consolidado total.")
-            # Unificar todas las pestañas que empiecen con 'Gasto-'
-            todas = []
+            st.info("Vista de Administrador: Consolidado de todas las pestañas.")
             for hoja in sh.worksheets():
                 if hoja.title.startswith("Gasto-"):
-                    todas.append(pd.DataFrame(hoja.get_all_records()))
+                    data = hoja.get_all_records()
+                    if data: todas.append(pd.DataFrame(data))
             df = pd.concat(todas) if todas else pd.DataFrame()
         else:
             ws = obtener_o_crear_pestana(sh, st.session_state.user)
-            df = pd.DataFrame(ws.get_all_records())
+            data = ws.get_all_records()
+            df = pd.DataFrame(data) if data else pd.DataFrame()
 
         if not df.empty:
-            df['total'] = pd.to_numeric(df['total'], errors='coerce')
-            st.plotly_chart(px.pie(df, values='total', names='Proveedor', title="Gastos por Proveedor"))
-        else: st.info("Sin datos para mostrar.")
+            # FIX: Aseguramos que los nombres coincidan con las mayúsculas de Sheets
+            df['Total'] = pd.to_numeric(df['Total'], errors='coerce')
+            df['Fecha'] = pd.to_datetime(df['Fecha'], errors='coerce')
+            
+            c1, c2 = st.columns(2)
+            # Métrica de Gasto Total
+            total_gs = df['Total'].sum()
+            c1.metric("Gasto Total Acumulado", f"{total_gs:,.0f} Gs.")
+            
+            # Gráfico de Pie por Proveedor
+            fig = px.pie(df, values='Total', names='Proveedor', title="Inversión por Proveedor")
+            st.plotly_chart(fig, use_container_width=True)
+        else: st.info("No hay datos cargados para generar el dashboard.")
 
-    # --- MÓDULO 3: HISTORIAL (CON PRIVACIDAD) ---
+    # --- MÓDULO 3: HISTORIAL (CON FILTROS DE FECHA) ---
     elif menu == "📅 Mi Historial":
-        st.title(f"📅 Registros en Gasto-{st.session_state.user}")
+        st.title(f"📅 Historial de Gastos")
         sh = conectar_sheets()
         
         if st.session_state.rol == "admin":
-            opcion_hoja = st.selectbox("Seleccionar Hoja a Visualizar", [h.title for h in sh.worksheets() if h.title.startswith("Gasto-")])
-            df = pd.DataFrame(sh.worksheet(opcion_hoja).get_all_records())
+            lista_hojas = [h.title for h in sh.worksheets() if h.title.startswith("Gasto-")]
+            hoja_sel = st.selectbox("Auditar Hoja de:", lista_hojas)
+            df = pd.DataFrame(sh.worksheet(hoja_sel).get_all_records())
         else:
             ws = obtener_o_crear_pestana(sh, st.session_state.user)
             df = pd.DataFrame(ws.get_all_records())
             
-        st.dataframe(df, use_container_width=True)
+        if not df.empty:
+            df['Fecha'] = pd.to_datetime(df['Fecha'], errors='coerce')
+            
+            # --- SECCIÓN DE FILTROS ---
+            st.markdown("### 🔍 Filtrar por Fecha")
+            col_f1, col_f2, col_f3 = st.columns(3)
+            
+            with col_f1:
+                filtro_tipo = st.selectbox("Rango Predefinido", ["Todo", "Esta Semana", "Este Mes", "Personalizado"])
+            
+            hoy = datetime.date.today()
+            if filtro_tipo == "Esta Semana":
+                inicio = hoy - datetime.timedelta(days=hoy.weekday())
+                fin = inicio + datetime.timedelta(days=6)
+            elif filtro_tipo == "Este Mes":
+                inicio = hoy.replace(day=1)
+                # Cálculo fin de mes
+                siguiente_mes = hoy.replace(day=28) + datetime.timedelta(days=4)
+                fin = siguiente_mes - datetime.timedelta(days=siguiente_mes.day)
+            elif filtro_tipo == "Personalizado":
+                with col_f2:
+                    inicio = st.date_input("Desde", hoy - datetime.timedelta(days=30))
+                with col_f3:
+                    fin = st.date_input("Hasta", hoy)
+            else:
+                inicio, fin = None, None
+
+            # Aplicar filtro si existe
+            if inicio and fin:
+                mask = (df['Fecha'].dt.date >= inicio) & (df['Fecha'].dt.date <= fin)
+                df_filtrado = df.loc[mask]
+                st.write(f"Mostrando datos desde **{inicio}** hasta **{fin}**")
+            else:
+                df_filtrado = df
+
+            st.dataframe(df_filtrado.sort_values(by='Fecha', ascending=False), use_container_width=True)
+            
+            # Resumen del filtro
+            st.info(f"Subtotal en este rango: **{df_filtrado['Total'].sum():,.0f} Gs.**")
+        else:
+            st.info("Aún no tienes registros cargados.")
 
     if menu == "🚀 Salir":
         st.session_state.auth = False
