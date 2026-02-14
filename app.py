@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
-from google import genai # <--- Nuevo motor oficial 2026
+from google import genai
+from google.genai import types # IMPORTANTE: Para el formato de archivos
 import json
 import time
 import datetime
@@ -8,35 +9,17 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # ==========================================
-# ⚙️ 1. CONFIGURACIÓN (REFORZADA)
+# ⚙️ 1. CONFIGURACIÓN
 # ==========================================
-st.set_page_config(page_title="Taller Cloud - Motor Nuevo", page_icon="⚙️", layout="wide")
+st.set_page_config(page_title="Taller Cloud 2026", page_icon="⚙️", layout="wide")
 
-# Intentar recuperar la clave de varias formas posibles
-api_key_env = None
-
-if "GOOGLE_API_KEY" in st.secrets:
+# Inicialización del Cliente IA con la nueva SDK
+try:
     api_key_env = st.secrets["GOOGLE_API_KEY"]
-elif "api_key" in st.secrets:
-    api_key_env = st.secrets["api_key"]
-elif "GEMINI_KEY" in st.secrets:
-    api_key_env = st.secrets["GEMINI_KEY"]
-
-if api_key_env:
-    try:
-        # Forzamos la versión v1 que es la más estable para producción
-        client_ia = genai.Client(api_key=api_key_env, http_options={'api_version': 'v1'})
-    except Exception as e:
-        st.error(f"❌ Error al inicializar el cliente de IA: {e}")
-        st.stop()
-else:
-    st.error("❌ ERROR CRÍTICO: No se encontró ninguna clave API en los Secrets.")
-    st.info("""
-    **Cómo solucionarlo:**
-    1. Ve a los Settings de tu app en Streamlit Cloud.
-    2. En 'Secrets', asegúrate de tener una línea que diga:
-    `GOOGLE_API_KEY = "tu_clave_aqui"`
-    """)
+    # Usamos la versión estable v1
+    client_ia = genai.Client(api_key=api_key_env, http_options={'api_version': 'v1'})
+except Exception as e:
+    st.error("❌ Configura GOOGLE_API_KEY en los Secrets de Streamlit.")
     st.stop()
 
 # ==========================================
@@ -55,26 +38,30 @@ def conectar_sheets():
         return None
 
 # ==========================================
-# 🧠 3. MOTOR IA (NUEVO SDK google.genai)
+# 🧠 3. MOTOR IA (SINTAXIS 2026 CORREGIDA)
 # ==========================================
 def analizar_factura(archivo_bytes, mime_type):
-    # Usamos el alias corto 'gemini-1.5-flash' o solo 'flash'
+    prompt = """Analiza esta factura de taller. Extrae en JSON: fecha (YYYY-MM-DD), 
+    proveedor, y lista de items con (producto, cantidad, unitario, total). 
+    Limpia los números de puntos de miles para que sean procesables."""
+    
     try:
+        # CORRECCIÓN CLAVE: Envolviendo el archivo en types.Part.from_bytes
         response = client_ia.models.generate_content(
-            model="gemini-1.5-flash", # Prueba cambiar a "gemini-1.5-flash" (sin v1beta)
+            model="gemini-1.5-flash",
             contents=[
-                "Analiza esta factura y extrae los datos en JSON: fecha, proveedor, items (producto, cantidad, unitario, total).",
-                {"mime_type": mime_type, "data": archivo_bytes}
+                prompt,
+                types.Part.from_bytes(data=archivo_bytes, mime_type=mime_type)
             ],
-            config={'response_mime_type': 'application/json'}
+            config=types.GenerateContentConfig(response_mime_type='application/json')
         )
         return json.loads(response.text)
     except Exception as e:
-        st.error(f"❌ Error de Llave o Conexión: {e}")
+        st.error(f"❌ Error de validación o API: {e}")
         return None
 
 # ==========================================
-# 🖥️ 4. INTERFAZ (IGUAL A LA ANTERIOR)
+# 🖥️ 4. INTERFAZ DE USUARIO
 # ==========================================
 if 'auth' not in st.session_state: st.session_state.auth = False
 
@@ -87,43 +74,56 @@ if not st.session_state.auth:
         st.session_state.user = u
         st.rerun()
 else:
-    menu = st.sidebar.radio("Menú", ["Cargar", "Historial", "Salir"])
-    
-    if menu == "Cargar":
-        st.title("📥 Cargar Factura")
-        f = st.file_uploader("Subir", type=["pdf", "jpg", "png"])
-        if f and st.button("Procesar con Motor Nuevo"):
-            datos = analizar_factura(f.getvalue(), f.type)
-            if datos:
-                st.write("### Datos detectados:")
-                st.json(datos)
-                
-                # Lógica de guardado en Sheets
-                sh = conectar_sheets()
-                if sh:
-                    ws = sh.worksheet("Gastos")
-                    for item in datos.get("items", []):
-                        # Limpieza básica de números
-                        def clean_n(n): return float(str(n).replace('.','').replace(',','.')) if n else 0
-                        
-                        ws.append_row([
-                            datos.get("fecha"), datos.get("proveedor"),
-                            item.get("producto"), clean_n(item.get("cantidad")),
-                            "u", clean_n(item.get("unitario")), clean_n(item.get("total")),
-                            st.session_state.user, str(datetime.datetime.now())
-                        ])
-                    st.success("✅ Guardado en la nube.")
+    with st.sidebar:
+        st.header(f"👤 {st.session_state.user}")
+        menu = st.radio("Menú", ["Cargar Factura", "Ver Historial", "Salir"])
 
-    elif menu == "Historial":
-        st.title("📊 Historial")
+    if menu == "Cargar Factura":
+        st.title("📥 Cargar Compra")
+        f = st.file_uploader("Sube PDF o Imagen", type=["pdf", "jpg", "png", "jpeg"])
+        
+        if f and st.button("Procesar Factura"):
+            with st.spinner("🤖 La IA está leyendo el documento..."):
+                datos = analizar_factura(f.getvalue(), f.type)
+                
+                if datos:
+                    st.write("### Datos detectados:")
+                    st.json(datos)
+                    
+                    sh = conectar_sheets()
+                    if sh:
+                        ws = sh.worksheet("Gastos")
+                        # Función para limpiar números latinos
+                        def clean_val(v):
+                            if not v: return 0.0
+                            try:
+                                s = str(v).replace('.','').replace(',','.')
+                                return float(s)
+                            except: return 0.0
+
+                        for item in datos.get("items", []):
+                            ws.append_row([
+                                datos.get("fecha"),
+                                datos.get("proveedor"),
+                                item.get("producto"),
+                                clean_val(item.get("cantidad")),
+                                "u",
+                                clean_val(item.get("unitario")),
+                                clean_val(item.get("total")),
+                                st.session_state.user,
+                                str(datetime.datetime.now())
+                            ])
+                        st.success("✅ ¡Guardado exitosamente en Google Sheets!")
+
+    elif menu == "Ver Historial":
+        st.title("📊 Historial de Compras")
         try:
             sh = conectar_sheets()
             df = pd.DataFrame(sh.worksheet("Gastos").get_all_records())
             st.dataframe(df, width='stretch')
-        except: st.error("No hay datos.")
-        
+        except:
+            st.info("No hay datos todavía.")
+            
     if menu == "Salir":
         st.session_state.auth = False
         st.rerun()
-
-
