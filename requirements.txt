@@ -2,3 +2,5 @@ streamlit
 pandas
 google-generativeai
 openpyxl
+gspread
+oauth2client
