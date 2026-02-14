@@ -72,7 +72,9 @@ def limpiar_monto_py(valor):
 
 def analizar_factura(archivo_bytes, mime_type):
     modelos = ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-2.0-flash"]
-    prompt = "Analiza esta factura de taller. Extrae en JSON: fecha (YYYY-MM-DD), proveedor, y lista de items (producto, cantidad, unitario, total). Devuelve SOLO JSON."
+    prompt = "Analiza esta factura. Extrae en JSON: fecha (YYYY-MM-DD), proveedor, y lista de items (producto, cantidad, unitario, total). Devuelve SOLO JSON."
+    
+    ultimo_error = ""
     
     for mod in modelos:
         try:
@@ -81,17 +83,25 @@ def analizar_factura(archivo_bytes, mime_type):
                 contents=[prompt, types.Part.from_bytes(data=archivo_bytes, mime_type=mime_type)]
             )
             txt = response.text.strip()
+            # Limpieza de Markdown
             if "```json" in txt: txt = txt.split("```json")[1].split("```")[0]
             elif "```" in txt: txt = txt.split("```")[1].split("```")[0]
             
             st.session_state.consultas_exitosas += 1
             return json.loads(txt)
         except Exception as e:
-            if "404" in str(e) or "429" in str(e): 
+            ultimo_error = str(e)
+            # Si es error de cuota o no encontrado, intentamos el siguiente
+            if "429" in ultimo_error or "404" in ultimo_error:
                 continue 
-            st.session_state.consultas_fallidas += 1
-            st.error(f"Error con modelo {mod}: {e}")
-            return None
+            else:
+                break # Si es otro tipo de error (llave inválida, etc.), paramos
+    
+    # Si llega aquí es porque falló todo
+    st.session_state.consultas_fallidas += 1
+    st.error(f"❌ Fallo total del motor de IA.")
+    with st.expander("Ver detalle técnico del error"):
+        st.code(ultimo_error)
     return None
 
 # ==========================================
@@ -162,3 +172,4 @@ else:
         * **1,500 Consultas por día:** Tienes margen de sobra para el taller.
         * **Costo:** $0.00 (Gratis).
         """)
+
