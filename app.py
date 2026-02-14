@@ -7,21 +7,33 @@ import time
 import datetime
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+import io
 
 # ==========================================
-# ⚙️ 1. CONFIGURACIÓN
+# ⚙️ 1. CONFIGURACIÓN Y ESTILOS
 # ==========================================
-st.set_page_config(page_title="Taller Pro 2026 - IA Monitor", page_icon="⚙️", layout="wide")
+st.set_page_config(page_title="Taller Pro Cloud 2026", page_icon="🔧", layout="wide")
+
+st.markdown("""
+    <style>
+    .stButton>button { width: 100%; border-radius: 10px; height: 3.5em; font-weight: bold; }
+    .stDownloadButton>button { width: 100%; border-radius: 10px; background-color: #28a745; color: white; }
+    </style>
+    """, unsafe_allow_html=True)
 
 try:
     api_key_env = st.secrets["GOOGLE_API_KEY"]
-    client_ia = genai.Client(api_key=api_key_env)
-except:
-    st.error("❌ No se encontró la API Key en Secrets.")
+    # FIX 404: Forzamos explícitamente la versión 'v1' estable
+    client_ia = genai.Client(
+        api_key=api_key_env,
+        http_options={'api_version': 'v1'}
+    )
+except Exception as e:
+    st.error(f"❌ Error de API Key: {e}")
     st.stop()
 
 # ==========================================
-# ☁️ 2. BASE DE DATOS
+# ☁️ 2. MOTOR DE BASE DE DATOS
 # ==========================================
 def conectar_sheets():
     try:
@@ -33,7 +45,7 @@ def conectar_sheets():
     except: return None
 
 # ==========================================
-# 🧠 3. MOTOR IA CON BARRA DE PROGRESO
+# 🧠 3. MOTOR IA CON MONITOR DE MODELO
 # ==========================================
 def limpiar_monto_py(valor):
     if not valor: return 0.0
@@ -46,81 +58,71 @@ def limpiar_monto_py(valor):
     except: return 0.0
 
 def analizar_factura(archivo_bytes, mime_type):
-    modelos = ["gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-2.0-flash"]
+    # Lista de modelos con nombres actualizados para v1 estable
+    modelos = ["gemini-1.5-flash", "gemini-1.5-flash-8b"]
     prompt = "Analiza esta factura. Extrae en JSON: fecha (YYYY-MM-DD), proveedor, y items (producto, cantidad, unitario, total). SOLO JSON."
     
-    # --- UI de Progreso ---
     progreso_bar = st.progress(0)
     estado_texto = st.empty()
     
     for idx, mod in enumerate(modelos):
-        # Actualizar visualmente qué modelo estamos probando
         porcentaje = int(((idx) / len(modelos)) * 100)
         progreso_bar.progress(porcentaje)
-        estado_texto.info(f"🤖 Intentando con motor: **{mod}**...")
+        estado_texto.info(f"🤖 Procesando con: **{mod}**...")
         
         try:
-            # Pausa breve para que el usuario vea el cambio de modelo
-            time.sleep(1) 
-            
             response = client_ia.models.generate_content(
                 model=mod,
                 contents=[prompt, types.Part.from_bytes(data=archivo_bytes, mime_type=mime_type)]
             )
-            
             txt = response.text.strip()
             if "```json" in txt: txt = txt.split("```json")[1].split("```")[0]
             elif "```" in txt: txt = txt.split("```")[1].split("```")[0]
             
-            # Éxito
             progreso_bar.progress(100)
-            estado_texto.success(f"✅ ¡Éxito con motor **{mod}**!")
+            estado_texto.success(f"✅ ¡Motor **{mod}** respondió!")
             time.sleep(1)
             estado_texto.empty()
             progreso_bar.empty()
-            
             return json.loads(txt)
             
         except Exception as e:
-            err_msg = str(e)
-            if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-                estado_texto.warning(f"⚠️ Cuota agotada en {mod}. Saltando...")
-                time.sleep(2)
-                continue 
+            if "404" in str(e) or "429" in str(e):
+                continue
             else:
-                estado_texto.error(f"❌ Error crítico con {mod}: {err_msg}")
+                st.error(f"❌ Error técnico: {e}")
                 return None
-                
+    
     progreso_bar.empty()
-    estado_texto.error("❌ Todos los motores están saturados.")
+    st.error("❌ Los modelos estables no están respondiendo. Intenta en unos minutos.")
     return None
 
 # ==========================================
-# 🖥️ 4. INTERFAZ
+# 🖥️ 4. INTERFAZ Y REPORTE
 # ==========================================
 if 'auth' not in st.session_state: st.session_state.auth = False
 
 if not st.session_state.auth:
-    st.title("🔐 Acceso Taller Pro")
+    st.title("🔐 Acceso Taller Pro Cloud")
     u = st.text_input("Usuario")
     p = st.text_input("Pass", type="password")
-    if st.button("Entrar", type="primary"):
+    if st.button("Entrar"):
         st.session_state.auth = True
         st.session_state.user = u
         st.rerun()
 else:
-    menu = st.sidebar.radio("Menú", ["📥 Cargar", "📊 Historial", "🚀 Salir"])
+    menu = st.sidebar.radio("Navegación", ["📥 Cargar Compra", "📊 Historial", "📅 Reporte Mensual", "🚀 Salir"])
 
-    if menu == "📥 Cargar":
+    if menu == "📥 Cargar Compra":
         st.title("📥 Digitalizar Factura")
-        f = st.file_uploader("Subir PDF o Imagen", type=["pdf", "png", "jpg"])
-        if f and st.button("Procesar con IA", type="primary"):
+        f = st.file_uploader("Sube PDF o Imagen", type=["pdf", "png", "jpg"])
+        if f and st.button("Procesar Factura"):
             datos = analizar_factura(f.getvalue(), f.type)
             if datos:
                 sh = conectar_sheets()
                 if sh:
                     ws = sh.worksheet("Gastos")
-                    with st.status("📝 Guardando en Google Sheets...", expanded=True) as status:
+                    with st.status("📝 Guardando en la nube...") as s:
                         for i in datos.get("items", []):
                             ws.append_row([
                                 datos.get("fecha", ""), datos.get("proveedor", ""),
@@ -128,20 +130,46 @@ else:
                                 "u", limpiar_monto_py(i.get("unitario")), limpiar_monto_py(i.get("total")),
                                 st.session_state.user, str(datetime.datetime.now())
                             ])
-                        status.update(label="✅ Registro completado!", state="complete", expanded=False)
+                        s.update(label="✅ ¡Listo!", state="complete")
                     st.balloons()
-                else: st.error("No se pudo conectar con Sheets.")
 
     elif menu == "📊 Historial":
-        st.title("📊 Historial de Gastos")
+        st.title("📊 Todos los Gastos")
         sh = conectar_sheets()
         if sh:
             df = pd.DataFrame(sh.worksheet("Gastos").get_all_records())
-            # Buscador rápido
             search = st.text_input("🔍 Buscar repuesto...")
             if search:
                 df = df[df.apply(lambda r: r.astype(str).str.contains(search, case=False).any(), axis=1)]
             st.dataframe(df, use_container_width=True)
+
+    elif menu == "📅 Reporte Mensual":
+        st.title("📅 Generar Reporte para Contabilidad")
+        sh = conectar_sheets()
+        if sh:
+            df = pd.DataFrame(sh.worksheet("Gastos").get_all_records())
+            if not df.empty:
+                # Convertir fechas para filtrar
+                df['Fecha'] = pd.to_datetime(df['Fecha'], errors='coerce')
+                meses = df['Fecha'].dt.strftime('%Y-%m').unique().tolist()
+                mes_sel = st.selectbox("Selecciona el mes del reporte", meses)
+                
+                reporte_df = df[df['Fecha'].dt.strftime('%Y-%m') == mes_sel]
+                st.write(f"### Resumen de {mes_sel}")
+                st.dataframe(reporte_df)
+                
+                # Botón de Descarga Excel
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    reporte_df.to_excel(writer, index=False, sheet_name='Reporte')
+                
+                st.download_button(
+                    label="📥 Descargar Reporte Excel",
+                    data=output.getvalue(),
+                    file_name=f"Reporte_Taller_{mes_sel}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            else: st.info("No hay datos para generar reportes.")
 
     if menu == "🚀 Salir":
         st.session_state.auth = False
