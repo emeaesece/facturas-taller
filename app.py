@@ -16,11 +16,9 @@ st.set_page_config(page_title="Taller Cloud 2026", page_icon="🔧", layout="wid
 st.markdown("""
     <style>
     .stButton>button { width: 100%; border-radius: 10px; height: 3.5em; font-weight: bold; }
-    .stDataFrame { border-radius: 10px; }
     </style>
     """, unsafe_allow_html=True)
 
-# Inicialización de la IA (Sin forzar versión para evitar el 404)
 try:
     api_key_env = st.secrets["GOOGLE_API_KEY"]
     client_ia = genai.Client(api_key=api_key_env)
@@ -34,7 +32,6 @@ except Exception as e:
 def conectar_sheets():
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        # Buscamos la sección gcp_service_account en los Secrets
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
@@ -55,36 +52,32 @@ def check_login(u, p):
     except: return False
 
 # ==========================================
-# 🧠 3. MOTOR DE IA CON FALLBACK (ANTI-404)
+# 🧠 3. MOTOR DE IA CON SALTO POR CUOTA (429)
 # ==========================================
 def limpiar_monto_py(valor):
-    """Limpia formatos: 1.500.000 / 1.500,50 / 1500.50"""
     if not valor: return 0.0
     try:
         s = str(valor).upper().replace('GS', '').replace('$', '').replace(' ', '').strip()
-        # Caso 1.250.000 (miles con punto)
         if '.' in s and ',' not in s:
             partes = s.split('.')
             if len(partes[-1]) == 3: s = s.replace('.', '')
-        # Caso 1.250,50 (miles con punto, decimal con coma)
         elif '.' in s and ',' in s:
             s = s.replace('.', '').replace(',', '.')
-        # Caso 1250,50 (decimal con coma)
         elif ',' in s:
             s = s.replace(',', '.')
         return float(s)
     except: return 0.0
 
 def analizar_factura(archivo_bytes, mime_type):
-    # Lista de modelos compatibles 2026
-    modelos = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-latest"]
-    prompt = """Analiza esta factura. Extrae en un JSON: 
+    # PRIORIDAD: 1.5 es más estable para cuotas gratuitas en 2026
+    modelos = ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-2.0-flash"]
+    prompt = """Analiza esta factura. Extrae un JSON: 
     {
       "fecha": "YYYY-MM-DD", 
       "proveedor": "Nombre", 
       "items": [{"producto": "desc", "cantidad": 1, "unitario": 0, "total": 0}]
     }
-    Devuelve SOLO el JSON, sin explicaciones."""
+    Devuelve SOLO el JSON."""
     
     for mod in modelos:
         try:
@@ -95,20 +88,25 @@ def analizar_factura(archivo_bytes, mime_type):
                     types.Part.from_bytes(data=archivo_bytes, mime_type=mime_type)
                 ]
             )
-            # Limpiar respuesta por si la IA incluye markdown
             txt = response.text.strip()
             if "```json" in txt: txt = txt.split("```json")[1].split("```")[0]
             elif "```" in txt: txt = txt.split("```")[1].split("```")[0]
             
             return json.loads(txt)
         except Exception as e:
-            if "404" in str(e): continue # Probar siguiente modelo
-            st.error(f"Error con modelo {mod}: {e}")
-            return None
+            # AHORA CAPTURAMOS TANTO EL 404 COMO EL 429
+            err_msg = str(e).upper()
+            if "404" in err_msg or "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                continue # Salta al siguiente modelo si la cuota está llena o no existe
+            else:
+                st.error(f"Error técnico con {mod}: {e}")
+                return None
+    
+    st.error("❌ Todos los modelos de Google están saturados. Inténtalo de nuevo en 1 minuto.")
     return None
 
 # ==========================================
-# 🖥️ 4. INTERFAZ DE USUARIO (UI)
+# 🖥️ 4. INTERFAZ DE USUARIO
 # ==========================================
 if 'sesion' not in st.session_state: st.session_state.sesion = False
 
@@ -132,7 +130,7 @@ else:
         f = st.file_uploader("Subir PDF o Imagen", type=["pdf", "png", "jpg", "jpeg"])
         
         if f and st.button("Procesar Factura", type="primary"):
-            with st.spinner("🧠 Analizando con IA..."):
+            with st.spinner("🧠 Consultando con la IA..."):
                 datos = analizar_factura(f.getvalue(), f.type)
                 if datos and "items" in datos:
                     st.write("### Datos detectados:")
@@ -143,7 +141,6 @@ else:
                         ws = sh.worksheet("Gastos")
                         count = 0
                         for i in datos["items"]:
-                            # Guardar fila con números limpios
                             ws.append_row([
                                 datos.get("fecha", ""),
                                 datos.get("proveedor", ""),
@@ -158,7 +155,7 @@ else:
                             count += 1
                         st.success(f"✅ ¡Guardado! {count} items registrados.")
                 else:
-                    st.error("No se detectó información. Intenta con una imagen más clara.")
+                    st.error("No se pudo extraer información. ¿Quizás se agotó la cuota de la IA?")
 
     elif menu == "Ver Historial":
         st.title("📊 Base de Datos")
