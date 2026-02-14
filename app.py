@@ -8,16 +8,17 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import plotly.express as px
 import time
+import re
 
 # ==========================================
 # ⚙️ 1. CONFIGURACIÓN
 # ==========================================
-st.set_page_config(page_title="Taller Pro - Carga Masiva", page_icon="🚀", layout="wide")
+st.set_page_config(page_title="Taller Pro - Gestión de Activos", page_icon="🚀", layout="wide")
 
 try:
     API_KEY = st.secrets["GOOGLE_API_KEY"]
 except:
-    st.error("❌ Falta la API Key en los Secrets.")
+    st.error("❌ Error: GOOGLE_API_KEY no configurada.")
     st.stop()
 
 # ==========================================
@@ -54,24 +55,38 @@ def check_login(u, p):
     except: return None
 
 # ==========================================
-# 🧠 3. MOTOR DE MONEDA Y IA
+# 🧠 3. MOTOR DE MONEDA (EL "PARAGUAYIZADOR")
 # ==========================================
 def limpiar_monto_py(valor, es_cantidad=False):
-    if not valor: return 0
-    s = str(valor).replace('Gs', '').replace('$', '').replace(' ', '').strip()
+    """
+    Lógica blindada para Paraguay 2026:
+    - Cantidad: Mantiene decimales (2.5 litros).
+    - Moneda: Elimina puntos y comas SIEMPRE. 10.000 es 10000.
+    """
+    if valor is None or valor == "": return 0
+    
+    # Convertir a string y quitar símbolos de moneda
+    s = str(valor).upper().replace('GS', '').replace('$', '').replace(' ', '').strip()
+    
     try:
         if es_cantidad:
+            # Reemplazamos coma por punto para que Python entienda el decimal
             s = s.replace(',', '.')
+            # Si el AI puso puntos de miles en la cantidad (ej: 1.000,50), los limpiamos
             if s.count('.') > 1:
                 partes = s.split('.')
                 s = "".join(partes[:-1]) + "." + partes[-1]
             return float(s)
         else:
-            if s.endswith(',00') or s.endswith('.00'): s = s[:-3]
-            elif s.endswith(',0') or s.endswith('.0'): s = s[:-2]
-            s = s.replace('.', '').replace(',', '')
-            return int(float(s))
-    except: return 0
+            # MONEDA (Guaraníes): En Paraguay NO usamos decimales. 
+            # Cualquier punto o coma es un separador de miles que debemos ELIMINAR.
+            # 10.000 -> 10000 | 10.500 -> 10500
+            
+            # Limpieza: Solo dejamos los dígitos
+            s_limpio = re.sub(r'[^\d]', '', s) 
+            return int(s_limpio) if s_limpio else 0
+    except:
+        return 0
 
 def analizar_factura_v1(archivo_bytes, mime_type):
     url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent?key={API_KEY}"
@@ -79,14 +94,16 @@ def analizar_factura_v1(archivo_bytes, mime_type):
     payload = {
         "contents": [{
             "parts": [
-                {"text": "Analiza esta factura. Devuelve JSON: fecha (YYYY-MM-DD), proveedor, nro_factura, y items (producto, cantidad, unitario, total)."},
+                {"text": """Analiza esta factura paraguaya. Extrae JSON: fecha (YYYY-MM-DD), proveedor, nro_factura, e items (producto, cantidad, unitario, total). 
+                REGLA DE ORO: Los precios en Guaraníes son números enteros grandes. Si ves 10.000, extrae 10000. NUNCA uses decimales en los precios."""},
                 {"inline_data": {"mime_type": mime_type, "data": archivo_b64}}
             ]
         }]
     }
     try:
-        response = requests.post(url, json=payload, timeout=30)
-        texto_ia = response.json()['candidates'][0]['content']['parts'][0]['text']
+        response = requests.post(url, json=payload, timeout=40)
+        res_json = response.json()
+        texto_ia = res_json['candidates'][0]['content']['parts'][0]['text']
         return json.loads(texto_ia.replace("```json", "").replace("```", "").strip())
     except: return None
 
@@ -96,73 +113,59 @@ def analizar_factura_v1(archivo_bytes, mime_type):
 if 'auth' not in st.session_state: st.session_state.auth = False
 
 if not st.session_state.auth:
-    st.title("🔐 Acceso Taller Pro")
+    st.title("🔐 Control de Gastos Taller")
     u = st.text_input("Usuario")
     p = st.text_input("Contraseña", type="password")
-    if st.button("Ingresar"):
+    if st.button("Acceder"):
         rol = check_login(u, p)
         if rol:
-            st.session_state.auth = True
-            st.session_state.user = u
-            st.session_state.rol = rol
+            st.session_state.auth, st.session_state.user, st.session_state.rol = True, u, rol
             st.rerun()
-        else: st.error("Credenciales incorrectas.")
+        else: st.error("Usuario o clave incorrectos.")
 else:
-    menu = st.sidebar.radio("Navegación", ["📥 Carga Masiva", "📊 Dashboard", "📅 Historial", "🚀 Salir"])
+    menu = st.sidebar.radio("Navegación", ["📥 Carga por Lote", "📊 Dashboard", "📅 Historial", "🚀 Salir"])
 
-    # --- MÓDULO 1: CARGA MASIVA ---
-    if menu == "📥 Carga Masiva":
-        st.title("📥 Digitalización por Lote (Máx. 20)")
-        # ACTIVAMOS MULTIPLE_FILES
-        files = st.file_uploader("Arrastra aquí tus facturas", type=["pdf", "png", "jpg", "jpeg"], accept_multiple_files=True)
+    if menu == "📥 Carga por Lote":
+        st.title(f"📥 Carga Masiva para: {st.session_state.user}")
+        files = st.file_uploader("Sube hasta 20 facturas", type=["pdf", "png", "jpg", "jpeg"], accept_multiple_files=True)
         
-        if files and st.button(f"Procesar {len(files)} archivos"):
+        if files and st.button(f"🚀 Procesar {len(files)} documentos"):
             all_items = []
-            progreso = st.progress(0)
-            status = st.empty()
-            
+            bar = st.progress(0)
             for i, f in enumerate(files):
-                porcentaje = (i + 1) / len(files)
-                status.info(f"🔎 Analizando archivo {i+1} de {len(files)}: **{f.name}**")
-                
+                st.info(f"Leyendo: {f.name}...")
                 datos = analizar_factura_v1(f.getvalue(), f.type)
                 if datos:
-                    for item in datos.get('items', []):
+                    for it in datos.get('items', []):
                         all_items.append({
                             'Fecha': datos.get('fecha', ""),
                             'Proveedor': datos.get('proveedor', ""),
                             'Factura': datos.get('nro_factura', ""),
-                            'Producto': item.get('producto', ""),
-                            'Cantidad': limpiar_monto_py(item.get('cantidad'), True),
-                            'Unitario': limpiar_monto_py(item.get('unitario')),
-                            'Total': limpiar_monto_py(item.get('total'))
+                            'Producto': it.get('producto', ""),
+                            'Cantidad': limpiar_monto_py(it.get('cantidad'), True),
+                            'Unitario': limpiar_monto_py(it.get('unitario')),
+                            'Total': limpiar_monto_py(it.get('total'))
                         })
-                progreso.progress(porcentaje)
-                time.sleep(0.5) # Breve pausa para estabilidad
-            
-            st.session_state.batch_df = pd.DataFrame(all_items)
-            status.success(f"✅ ¡Se han analizado {len(files)} archivos con éxito!")
+                bar.progress((i + 1) / len(files))
+            st.session_state.batch = pd.DataFrame(all_items)
+            st.success("Análisis completo.")
 
-        if 'batch_df' in st.session_state and not st.session_state.batch_df.empty:
+        if 'batch' in st.session_state and not st.session_state.batch.empty:
             st.markdown("---")
-            st.subheader("📝 Revisión de Datos Consolidados")
-            st.warning("Revisa y corrige cualquier dato en la tabla antes de guardar todo en la nube.")
+            st.subheader("📝 Revisión Previa al Guardado")
+            # El editor permite corregir si la IA leyó algo mal
+            edited = st.data_editor(st.session_state.batch, use_container_width=True)
             
-            # Editor de tabla con todos los datos de todos los archivos
-            edit_df = st.data_editor(st.session_state.batch_df, use_container_width=True, num_rows="dynamic")
-            
-            if st.button("Guardar todo en Google Sheets", type="primary"):
+            if st.button("Confirmar y Guardar Todo", type="primary"):
                 sh = conectar_sheets()
                 ws = obtener_o_crear_pestana(sh, st.session_state.user)
                 existentes = pd.DataFrame(ws.get_all_records())
                 
-                with st.spinner("Guardando en tu pestaña personal..."):
-                    for _, row in edit_df.iterrows():
+                with st.spinner("Guardando..."):
+                    for _, row in edited.iterrows():
                         id_u = f"{row['Proveedor']}_{row['Fecha']}_{row['Factura']}_{row['Producto']}".upper().replace(" ", "")
-                        
                         if not existentes.empty and 'ID_Unico' in existentes.columns:
-                            if id_u in existentes['ID_Unico'].values:
-                                continue # Omite duplicados silenciosamente
+                            if id_u in existentes['ID_Unico'].values: continue
                         
                         ws.append_row([
                             str(row['Fecha']), str(row['Proveedor']), str(row['Factura']), 
@@ -170,54 +173,40 @@ else:
                             row['Unitario'], row['Total'], st.session_state.user, 
                             id_u, str(datetime.datetime.now())
                         ])
-                
-                st.success(f"✅ ¡{len(edit_df)} registros guardados!")
-                st.session_state.batch_df = None
+                st.success("✅ Guardado exitoso.")
+                st.session_state.batch = None
                 st.balloons()
 
-    # --- MÓDULO 2: DASHBOARD (SE MANTIENE) ---
     elif menu == "📊 Dashboard":
-        st.title("📊 Análisis de Gastos")
+        st.title("📊 Resumen Gerencial")
         sh = conectar_sheets()
-        todas = []
         if st.session_state.rol == "admin":
-            for hoja in sh.worksheets():
-                if hoja.title.startswith("Gasto-"):
-                    data = hoja.get_all_records()
-                    if data: todas.append(pd.DataFrame(data))
-            df = pd.concat(todas) if todas else pd.DataFrame()
+            dfs = [pd.DataFrame(h.get_all_records()) for h in sh.worksheets() if h.title.startswith("Gasto-")]
+            df = pd.concat(dfs) if dfs else pd.DataFrame()
         else:
-            ws = obtener_o_crear_pestana(sh, st.session_state.user)
-            data = ws.get_all_records()
-            df = pd.DataFrame(data) if data else pd.DataFrame()
+            df = pd.DataFrame(obtener_o_crear_pestana(sh, st.session_state.user).get_all_records())
 
         if not df.empty:
             df['Total'] = pd.to_numeric(df['Total'], errors='coerce')
             st.metric("Inversión Total", f"{df['Total'].sum():,.0f} Gs.")
-            st.plotly_chart(px.pie(df, values='Total', names='Proveedor', hole=.3))
+            st.plotly_chart(px.bar(df.groupby('Proveedor')['Total'].sum().reset_index(), x='Proveedor', y='Total'))
         else: st.info("Sin datos.")
 
-    # --- MÓDULO 3: HISTORIAL (CON FILTROS) ---
     elif menu == "📅 Historial":
-        st.title("📅 Mi Historial")
+        st.title("📅 Mis Registros")
         sh = conectar_sheets()
         if st.session_state.rol == "admin":
-            lista = [h.title for h in sh.worksheets() if h.title.startswith("Gasto-")]
-            sel = st.selectbox("Ver datos de:", lista)
+            hojas = [h.title for h in sh.worksheets() if h.title.startswith("Gasto-")]
+            sel = st.selectbox("Ver registros de:", hojas)
             df = pd.DataFrame(sh.worksheet(sel).get_all_records())
         else:
-            ws = obtener_o_crear_pestana(sh, st.session_state.user)
-            df = pd.DataFrame(ws.get_all_records())
+            df = pd.DataFrame(obtener_o_crear_pestana(sh, st.session_state.user).get_all_records())
             
         if not df.empty:
             df['Fecha'] = pd.to_datetime(df['Fecha'], errors='coerce')
-            # Filtro simple por mes
-            meses = df['Fecha'].dt.strftime('%Y-%m').unique()
-            mes_sel = st.selectbox("Filtrar por Mes", ["Todos"] + list(meses))
-            if mes_sel != "Todos":
-                df = df[df['Fecha'].dt.strftime('%Y-%m') == mes_sel]
+            mes = st.selectbox("Filtrar por Mes", ["Todos"] + list(df['Fecha'].dt.strftime('%Y-%m').unique()))
+            if mes != "Todos": df = df[df['Fecha'].dt.strftime('%Y-%m') == mes]
             st.dataframe(df.sort_values('Fecha', ascending=False), use_container_width=True)
-        else: st.info("Vacío.")
 
     if menu == "🚀 Salir":
         st.session_state.auth = False
