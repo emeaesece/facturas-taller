@@ -12,7 +12,7 @@ import re
 # ==========================================
 # ⚙️ 1. CONFIGURACIÓN
 # ==========================================
-st.set_page_config(page_title="Taller Pro - v29 Edición", page_icon="🔧", layout="wide")
+st.set_page_config(page_title="Taller Pro - v30 Control Total", page_icon="🔧", layout="wide")
 
 if 'batch' not in st.session_state:
     st.session_state.batch = pd.DataFrame()
@@ -20,7 +20,7 @@ if 'batch' not in st.session_state:
 try:
     API_KEY = st.secrets["GOOGLE_API_KEY"]
 except:
-    st.error("❌ Error: GOOGLE_API_KEY no configurada.")
+    st.error("❌ Error: API Key no configurada.")
     st.stop()
 
 # ==========================================
@@ -71,7 +71,7 @@ def analizar_factura_v1(archivo_bytes, mime_type):
     payload = {
         "contents": [{
             "parts": [
-                {"text": "Analiza esta factura de Paraguay. Extrae JSON: fecha (YYYY-MM-DD), proveedor, nro_factura, e items (producto, cantidad, unitario, total)."},
+                {"text": "Analiza esta factura. Extrae JSON: fecha (YYYY-MM-DD), proveedor, nro_factura, e items (producto, cantidad, unitario, total)."},
                 {"inline_data": {"mime_type": mime_type, "data": archivo_b64}}
             ]
         }]
@@ -83,7 +83,7 @@ def analizar_factura_v1(archivo_bytes, mime_type):
     except: return None
 
 # ==========================================
-# 🖥️ 4. INTERFAZ Y LÓGICA
+# 🖥️ 4. INTERFAZ
 # ==========================================
 if 'auth' not in st.session_state: st.session_state.auth = False
 
@@ -92,7 +92,7 @@ if not st.session_state.auth:
     u = st.text_input("Usuario")
     p = st.text_input("Clave", type="password")
     if st.button("Entrar"):
-        st.session_state.auth, st.session_state.user, st.session_state.rol = True, u, 'admin'
+        st.session_state.auth, st.session_state.user = True, u
         st.rerun()
 else:
     menu = st.sidebar.radio("Menú", ["📥 Carga Masiva", "📊 Dashboard", "📅 Historial", "🚀 Salir"])
@@ -135,87 +135,93 @@ else:
 
     # --- MÓDULO 2: DASHBOARD ---
     elif menu == "📊 Dashboard":
-        st.title("📊 Indicadores de Gestión")
+        st.title("📊 Indicadores")
         dfs = []
         for h in sh.worksheets():
             if h.title.startswith("Gasto-"):
                 data = h.get_all_records()
                 if data: dfs.append(pd.DataFrame(data))
         df = pd.concat(dfs) if dfs else pd.DataFrame()
-
         if not df.empty:
             df['Total'] = pd.to_numeric(df['Total'], errors='coerce').fillna(0)
-            df['Fecha'] = pd.to_datetime(df['Fecha'], errors='coerce')
-            c1, c2 = st.columns(2)
-            c1.metric("Inversión Total", f"{df['Total'].sum():,.0f} Gs.")
-            c2.metric("Registros Totales", len(df))
+            st.metric("Inversión Total", f"{df['Total'].sum():,.0f} Gs.")
             st.plotly_chart(px.pie(df, values='Total', names='Proveedor', title="Inversión por Proveedor", hole=.4), use_container_width=True)
-            df_time = df.groupby(df['Fecha'].dt.strftime('%Y-%m'))['Total'].sum().reset_index()
-            st.plotly_chart(px.line(df_time, x='Fecha', y='Total', title="Tendencia Mensual", markers=True), use_container_width=True)
-        else: st.info("Sin datos suficientes.")
+        else: st.info("Sin datos.")
 
-    # --- MÓDULO 3: HISTORIAL (CON EDICIÓN DIRECTA) ---
+    # --- MÓDULO 3: HISTORIAL (CON EDICIÓN Y BORRADO) ---
     elif menu == "📅 Historial":
-        st.title("📅 Historial y Corrección de Datos")
+        st.title("📅 Gestión del Historial")
         ws = obtener_o_crear_pestana(sh, st.session_state.user)
-        # Cargamos los datos crudos para no perder nada al filtrar
         df_full = pd.DataFrame(ws.get_all_records())
         
         if not df_full.empty:
-            # Filtros y Buscador
+            # Filtros
             col1, col2 = st.columns([2, 2])
             with col1:
                 search = st.text_input("🔍 Buscar por Producto", "")
             with col2:
                 fecha_rango = st.date_input("📅 Rango de Fechas", [])
 
-            # Creamos una copia para visualizar/filtrar
+            # Preparar visualización
             df_display = df_full.copy()
-            df_display['Fecha'] = pd.to_datetime(df_display['Fecha'], errors='coerce')
+            # Convertimos tipos para que el editor los reconozca bien
+            df_display['Cantidad'] = pd.to_numeric(df_display['Cantidad'], errors='coerce')
+            df_display['Unitario'] = pd.to_numeric(df_display['Unitario'], errors='coerce')
+            df_display['Total'] = pd.to_numeric(df_display['Total'], errors='coerce')
+            
+            # Columna para seleccionar eliminación
+            df_display.insert(0, "Eliminar", False)
             
             if search:
                 df_display = df_display[df_display['Producto'].astype(str).str.contains(search, case=False, na=False)]
             if len(fecha_rango) == 2:
                 start, end = fecha_rango
-                df_display = df_display[(df_display['Fecha'].dt.date >= start) & (df_display['Fecha'].dt.date <= end)]
+                df_display['Fecha_dt'] = pd.to_datetime(df_display['Fecha'], errors='coerce').dt.date
+                df_display = df_display[(df_display['Fecha_dt'] >= start) & (df_display['Fecha_dt'] <= end)]
+                df_display.drop(columns=['Fecha_dt'], inplace=True)
             
-            st.warning("⚠️ Los cambios realizados en la tabla de abajo se guardarán permanentemente en Google Sheets.")
+            st.info("Para editar: doble clic en la celda. Para borrar: marca el check 'Eliminar'.")
             
-            # EDITOR DE DATOS: Permite modificar registros existentes
-            # Nota: Bloqueamos ID_Unico y Timestamp para seguridad
+            # EDITOR: Solo ID_Unico y Usuario son de lectura
             df_edited = st.data_editor(
-                df_display.sort_values(by="Fecha", ascending=False),
+                df_display.sort_values(by="Timestamp", ascending=False),
                 use_container_width=True,
-                disabled=["Usuario", "ID_Unico", "Timestamp"] 
+                disabled=["ID_Unico", "Usuario", "Timestamp"],
+                hide_index=True
             )
             
-            if st.button("💾 Guardar Cambios en la Nube", type="primary"):
-                with st.spinner("Sincronizando con Google Sheets..."):
-                    # 1. Obtenemos todos los registros (por si hubo cambios en paralelo)
-                    # 2. Reemplazamos los datos en la hoja
-                    # Para simplificar y asegurar consistencia, sobreescribimos la pestaña
-                    # con el dataframe actualizado.
+            if st.button("💾 Aplicar Cambios y Eliminaciones", type="primary"):
+                with st.spinner("Actualizando base de datos..."):
+                    # 1. Identificar filas a eliminar
+                    ids_a_eliminar = df_edited[df_edited['Eliminar'] == True]['ID_Unico'].values
                     
-                    # Primero combinamos los cambios del editor con el dataframe completo
+                    # 2. Tomar el dataframe completo original y actualizar con los cambios del editor
+                    # Solo actualizamos las filas que NO fueron marcadas para eliminar
                     df_full.set_index('ID_Unico', inplace=True)
-                    df_edited_copy = df_edited.copy()
-                    df_edited_copy.set_index('ID_Unico', inplace=True)
+                    df_edited_clean = df_edited[df_edited['Eliminar'] == False].drop(columns=['Eliminar'])
+                    df_edited_clean.set_index('ID_Unico', inplace=True)
                     
-                    df_full.update(df_edited_copy)
+                    # Actualizar datos existentes
+                    df_full.update(df_edited_clean)
                     df_full.reset_index(inplace=True)
                     
-                    # Limpiamos la hoja y subimos el nuevo set de datos
+                    # 3. Eliminar físicamente los registros marcados
+                    df_final = df_full[~df_full['ID_Unico'].isin(ids_a_eliminar)]
+                    
+                    # 4. Sobreescribir en Google Sheets
                     ws.clear()
-                    # Reinsertamos encabezados
                     columnas = ["Fecha", "Proveedor", "Factura", "Producto", "Cantidad", "Medida", "Unitario", "Total", "Usuario", "ID_Unico", "Timestamp"]
-                    # Preparamos los datos para subir
-                    datos_a_subir = [columnas] + df_full[columnas].values.tolist()
+                    # Forzar tipos antes de subir
+                    df_final['Unitario'] = df_final['Unitario'].astype(int)
+                    df_final['Total'] = df_final['Total'].astype(int)
+                    
+                    datos_a_subir = [columnas] + df_final[columnas].values.tolist()
                     ws.update('A1', datos_a_subir)
                     
-                st.success("✅ ¡Base de datos actualizada correctamente!")
+                st.success(f"✅ ¡Operación exitosa! Se eliminaron {len(ids_a_eliminar)} registros y se actualizaron los demás.")
                 st.rerun()
         else:
-            st.info("No hay registros cargados.")
+            st.info("No hay registros.")
 
     if menu == "🚀 Salir":
         st.session_state.auth = False
