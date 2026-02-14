@@ -3,4 +3,4 @@ pandas
 google-genai
 gspread
 oauth2client
-xlsxwriter
+plotly
