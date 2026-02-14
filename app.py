@@ -11,7 +11,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 # ==========================================
 # ⚙️ 1. CONFIGURACIÓN
 # ==========================================
-st.set_page_config(page_title="Taller Pro 2026", page_icon="⚙️", layout="wide")
+st.set_page_config(page_title="Taller Pro 2026 - IA Monitor", page_icon="⚙️", layout="wide")
 
 try:
     api_key_env = st.secrets["GOOGLE_API_KEY"]
@@ -33,7 +33,7 @@ def conectar_sheets():
     except: return None
 
 # ==========================================
-# 🧠 3. MOTOR IA REFORZADO (PRIORIDAD 1.5)
+# 🧠 3. MOTOR IA CON BARRA DE PROGRESO
 # ==========================================
 def limpiar_monto_py(valor):
     if not valor: return 0.0
@@ -46,31 +46,53 @@ def limpiar_monto_py(valor):
     except: return 0.0
 
 def analizar_factura(archivo_bytes, mime_type):
-    # CAMBIO CLAVE: Ponemos el 1.5 primero, el 8b después (que tiene más cuota) y el 2.0 al final
     modelos = ["gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-2.0-flash"]
     prompt = "Analiza esta factura. Extrae en JSON: fecha (YYYY-MM-DD), proveedor, y items (producto, cantidad, unitario, total). SOLO JSON."
     
-    for mod in modelos:
+    # --- UI de Progreso ---
+    progreso_bar = st.progress(0)
+    estado_texto = st.empty()
+    
+    for idx, mod in enumerate(modelos):
+        # Actualizar visualmente qué modelo estamos probando
+        porcentaje = int(((idx) / len(modelos)) * 100)
+        progreso_bar.progress(porcentaje)
+        estado_texto.info(f"🤖 Intentando con motor: **{mod}**...")
+        
         try:
+            # Pausa breve para que el usuario vea el cambio de modelo
+            time.sleep(1) 
+            
             response = client_ia.models.generate_content(
                 model=mod,
                 contents=[prompt, types.Part.from_bytes(data=archivo_bytes, mime_type=mime_type)]
             )
+            
             txt = response.text.strip()
             if "```json" in txt: txt = txt.split("```json")[1].split("```")[0]
             elif "```" in txt: txt = txt.split("```")[1].split("```")[0]
+            
+            # Éxito
+            progreso_bar.progress(100)
+            estado_texto.success(f"✅ ¡Éxito con motor **{mod}**!")
+            time.sleep(1)
+            estado_texto.empty()
+            progreso_bar.empty()
+            
             return json.loads(txt)
             
         except Exception as e:
             err_msg = str(e)
-            # Si el error es por cuota (429), esperamos 3 segundos y probamos el siguiente modelo
             if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-                st.warning(f"⚠️ Cuota agotada en {mod}. Saltando al siguiente motor...")
-                time.sleep(3) 
+                estado_texto.warning(f"⚠️ Cuota agotada en {mod}. Saltando...")
+                time.sleep(2)
                 continue 
             else:
-                st.error(f"❌ Error con {mod}: {err_msg}")
+                estado_texto.error(f"❌ Error crítico con {mod}: {err_msg}")
                 return None
+                
+    progreso_bar.empty()
+    estado_texto.error("❌ Todos los motores están saturados.")
     return None
 
 # ==========================================
@@ -79,7 +101,7 @@ def analizar_factura(archivo_bytes, mime_type):
 if 'auth' not in st.session_state: st.session_state.auth = False
 
 if not st.session_state.auth:
-    st.title("🔐 Acceso Taller")
+    st.title("🔐 Acceso Taller Pro")
     u = st.text_input("Usuario")
     p = st.text_input("Pass", type="password")
     if st.button("Entrar", type="primary"):
@@ -90,14 +112,15 @@ else:
     menu = st.sidebar.radio("Menú", ["📥 Cargar", "📊 Historial", "🚀 Salir"])
 
     if menu == "📥 Cargar":
-        f = st.file_uploader("Subir factura", type=["pdf", "png", "jpg"])
-        if f and st.button("Procesar", type="primary"):
-            with st.spinner("🧠 Leyendo factura..."):
-                datos = analizar_factura(f.getvalue(), f.type)
-                if datos:
-                    sh = conectar_sheets()
-                    if sh:
-                        ws = sh.worksheet("Gastos")
+        st.title("📥 Digitalizar Factura")
+        f = st.file_uploader("Subir PDF o Imagen", type=["pdf", "png", "jpg"])
+        if f and st.button("Procesar con IA", type="primary"):
+            datos = analizar_factura(f.getvalue(), f.type)
+            if datos:
+                sh = conectar_sheets()
+                if sh:
+                    ws = sh.worksheet("Gastos")
+                    with st.status("📝 Guardando en Google Sheets...", expanded=True) as status:
                         for i in datos.get("items", []):
                             ws.append_row([
                                 datos.get("fecha", ""), datos.get("proveedor", ""),
@@ -105,14 +128,19 @@ else:
                                 "u", limpiar_monto_py(i.get("unitario")), limpiar_monto_py(i.get("total")),
                                 st.session_state.user, str(datetime.datetime.now())
                             ])
-                        st.success("✅ ¡Guardado!")
-                else: st.error("No se pudo procesar. Intenta en 1 minuto.")
+                        status.update(label="✅ Registro completado!", state="complete", expanded=False)
+                    st.balloons()
+                else: st.error("No se pudo conectar con Sheets.")
 
     elif menu == "📊 Historial":
-        st.title("📊 Gastos Registrados")
+        st.title("📊 Historial de Gastos")
         sh = conectar_sheets()
         if sh:
             df = pd.DataFrame(sh.worksheet("Gastos").get_all_records())
+            # Buscador rápido
+            search = st.text_input("🔍 Buscar repuesto...")
+            if search:
+                df = df[df.apply(lambda r: r.astype(str).str.contains(search, case=False).any(), axis=1)]
             st.dataframe(df, use_container_width=True)
 
     if menu == "🚀 Salir":
